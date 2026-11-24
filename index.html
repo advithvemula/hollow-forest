@@ -1,0 +1,2057 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Hollow Forest</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Cinzel:wght@700;900&family=VT323&display=swap">
+<style>
+/* Layout concept: one full-screen canvas, letterboxed to 960x640, all UI drawn inside it.
+   Single committed look (a night forest lit by one lamp), so no light theme. */
+:root {
+  --bg: #0b0710;
+  --fg: #fff4d6;
+  --ember: #ff962a;
+  --ember-hot: #ffdc78;
+  --font-display: "Cinzel", Georgia, "Times New Roman", serif;
+  --font-body: "Atkinson Hyperlegible", system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: dark;
+}
+html, body { height: 100%; margin: 0; overflow: hidden; background: var(--bg); color: var(--fg); }
+body { font-family: var(--font-body); font-size: 18px; }
+#stage { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--bg); }
+#c { display: block; background: var(--bg); touch-action: none; user-select: none; -webkit-user-select: none;
+     -webkit-touch-callout: none; outline: none; }
+noscript { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px; text-align: center; font-size: 20px; }
+</style>
+
+<div id="stage"><canvas id="c" tabindex="0" aria-label="Hollow Forest game"></canvas></div>
+<noscript>Hollow Forest needs JavaScript to run.</noscript>
+
+<script>
+"use strict";
+/* =====================================================================
+   HOLLOW FOREST  (web edition)
+   A lantern looks for the mother who carried it into the forest.
+   Keep the oil lamp burning, burn the shadows, walk 20 nights in 4 acts,
+   upgrade the lamp between runs.
+   Keys: WASD/Arrows move | Mouse aim + hold click shoot | Space/Shift dash | P pause | M mute
+   Story pages: click / Enter to advance, Esc or SKIP to skip.
+   Touch: left thumb moves, right thumb aims and fires, DASH button.
+   ===================================================================== */
+const W = 960, H = 640, TAU = Math.PI * 2;
+const cv = document.getElementById("c");
+const ctx = cv.getContext("2d");
+const darkCv = document.createElement("canvas"); darkCv.width = W; darkCv.height = H;
+const dctx = darkCv.getContext("2d");
+
+const FONT_D = '"Cinzel", Georgia, serif';
+const FONT_B = '"Atkinson Hyperlegible", system-ui, sans-serif';
+try { document.fonts.load('700 24px "Atkinson Hyperlegible"'); document.fonts.load('900 60px "Cinzel"'); } catch (e) {}
+
+/* ---------- colours ---------- */
+const WHITE = "#ffffff", CREAM = "#fff0c8", EMBER = "#ff962a", EMBER_HOT = "#ffdc78",
+      DANGER = "#ff6e6e", GOOD = "#96ff96", BLACK = "#000000",
+      BTN = "#301e16", BTN_HOT = "#824b14", BTN_OFF = "#221a18", ORB = "#cfe0ff";
+
+/* ---------- helpers ---------- */
+const rand = (a, b) => a + Math.random() * (b - a);
+const randi = (a, b) => Math.floor(rand(a, b + 1));
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const rgb = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
+const lerp = (a, b, u) => a + (b - a) * u;
+function norm(x, y) { const l = Math.hypot(x, y); return l > 0 ? { x: x / l, y: y / l } : { x: 0, y: 0 }; }
+function mulberry(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+/* ---------- game data (mirrors data.gd) ---------- */
+const PLAYER_R = 12, OIL_PICKUP = 20, SHOT_OIL = 0.8;
+const UPGRADES = [
+  { key: "tank",   name: "Oil Tank",    base: 25,  max: 7, fmt: l => `${100 + 25 * l} max oil` },
+  { key: "wick",   name: "Bright Wick", base: 25,  max: 7, fmt: l => `+${28 * l} light` },
+  { key: "power",  name: "Flame Power", base: 40,  max: 7, fmt: l => `${(1 + 0.6 * l).toFixed(1)} damage` },
+  { key: "rate",   name: "Quick Flame", base: 35,  max: 7, fmt: l => `${(1 / (0.4 * 0.88 ** l)).toFixed(1)} shots/s` },
+  { key: "burner", name: "Slow Burner", base: 30,  max: 6, fmt: l => `${(1.8 * (1 - 0.1 * l)).toFixed(2)} oil/s` },
+  { key: "boots",  name: "Swift Boots", base: 20,  max: 6, fmt: l => `${Math.floor(235 * (1 + 0.08 * l))} speed` },
+  { key: "dash",   name: "Dash Spark",  base: 25,  max: 7, fmt: l => `${(1.3 * 0.9 ** l).toFixed(1)}s/${Math.round(3 + 1.5 * l)}dmg` },
+  { key: "multi",  name: "Split Flame", base: 120, max: 2, fmt: l => `${1 + l} bolt${l ? "s" : ""}` },
+];
+const UPG = Object.fromEntries(UPGRADES.map(u => [u.key, u]));
+const upgradeCost = (u, l) => Math.floor(u.base * 1.5 ** l);
+function computeStats(up) {
+  return { maxOil: 100 + 25 * up.tank, radiusBonus: 28 * up.wick, damage: 1 + 0.6 * up.power,
+    fireCd: 0.4 * 0.88 ** up.rate, burn: 1.8 * (1 - 0.1 * up.burner), speed: 235 * (1 + 0.08 * up.boots),
+    dashCd: 1.3 * 0.9 ** up.dash, dashDmg: 3 + 1.5 * up.dash, bolts: 1 + up.multi };
+}
+const MON = {
+  crawler: { hp: 2,   speed: 62,  r: 17, dmg: 16, shards: 2,  col: [34, 12, 46] },
+  runner:  { hp: 1,   speed: 125, r: 13, dmg: 12, shards: 3,  col: [52, 12, 30] },
+  brute:   { hp: 7,   speed: 44,  r: 27, dmg: 26, shards: 7,  col: [30, 18, 16] },
+  wisp:    { hp: 1.5, speed: 150, r: 11, dmg: 14, shards: 4,  col: [34, 44, 66] },
+  hollow:  { hp: 12,  speed: 38,  r: 31, dmg: 34, shards: 11, col: [24, 22, 30] },
+  boss:    { hp: 50,  speed: 55,  r: 46, dmg: 32, shards: 60, col: [48, 10, 58] },
+};
+// Boss looks: king / mother (charge), warden (bell rings), emperor (stolen-light orbs + blink)
+const BOSS_COL = { king: [60, 36, 24], mother: [58, 40, 78], warden: [52, 56, 70], emperor: [20, 14, 30] };
+// Ground colours by act: the world gets colder and greyer as the story goes on.
+const ACT_PAL = [
+  { bg: [26, 34, 24], blob: [32, 42, 28], g0: [40, 70, 40], g1: [70, 110, 60] },
+  { bg: [24, 30, 30], blob: [30, 38, 38], g0: [44, 66, 56], g1: [70, 100, 88] },
+  { bg: [24, 26, 34], blob: [30, 33, 44], g0: [58, 66, 86], g1: [90, 104, 130] },
+  { bg: [34, 34, 38], blob: [42, 42, 48], g0: [86, 86, 94], g1: [128, 128, 136] },
+];
+const LEVELS = [
+  { name: "Whispering Edge",    goal: 8,  spawn: 2.4,  mix: [["crawler", 1]], speed: 1.00, cap: 5 },
+  { name: "Mossy Hollow",       goal: 12, spawn: 2.1,  mix: [["crawler", 3], ["runner", 1]], speed: 1.02, cap: 6 },
+  { name: "Rotting Grove",      goal: 16, spawn: 1.9,  mix: [["crawler", 3], ["runner", 2]], speed: 1.05, cap: 7 },
+  { name: "Hollow King",        boss: true, btype: "king", bossHp: 100, goal: 1, spawn: 7.0, mix: [["crawler", 1]], speed: 1.0, cap: 4 },
+  { name: "Gloomwood",          goal: 20, spawn: 1.7,  mix: [["crawler", 3], ["runner", 2], ["brute", 1]], speed: 1.08, cap: 8 },
+  { name: "Black Marsh",        goal: 26, spawn: 1.5,  mix: [["crawler", 2], ["runner", 2], ["brute", 1]], speed: 1.12, cap: 9 },
+  { name: "Ashen Deep",         goal: 32, spawn: 1.3,  mix: [["crawler", 2], ["runner", 3], ["brute", 2]], speed: 1.16, cap: 10 },
+  { name: "Night Mother",       boss: true, btype: "mother", bossHp: 350, goal: 1, spawn: 5.0, mix: [["crawler", 2], ["runner", 2], ["brute", 1]], speed: 1.1, cap: 6 },
+  { name: "Drowned Chapel",     goal: 34, spawn: 1.10, mix: [["crawler", 2], ["runner", 2], ["brute", 2], ["wisp", 1]], speed: 1.18, cap: 12 },
+  { name: "Lantern Graveyard",  goal: 38, spawn: 1.06, mix: [["crawler", 2], ["runner", 2], ["brute", 2], ["wisp", 2]], speed: 1.2, cap: 13 },
+  { name: "The Empty Orchard",  goal: 42, spawn: 1.01, mix: [["crawler", 2], ["runner", 2], ["brute", 2], ["wisp", 2], ["hollow", 1]], speed: 1.22, cap: 13 },
+  { name: "Cradle Road",        goal: 46, spawn: 0.97, mix: [["crawler", 2], ["runner", 2], ["brute", 2], ["wisp", 3], ["hollow", 1]], speed: 1.25, cap: 14 },
+  { name: "Bell Tower Stair",   goal: 50, spawn: 0.92, mix: [["crawler", 1], ["runner", 2], ["brute", 2], ["wisp", 3], ["hollow", 2]], speed: 1.28, cap: 14 },
+  { name: "The Bell Warden",    boss: true, btype: "warden", bossHp: 1100, goal: 1, spawn: 4.5, mix: [["wisp", 2], ["runner", 1]], speed: 1.15, cap: 6 },
+  { name: "Hollowmere",         goal: 52, spawn: 0.88, mix: [["crawler", 2], ["runner", 2], ["brute", 2], ["wisp", 3], ["hollow", 2]], speed: 1.3, cap: 15 },
+  { name: "The Unlit Lanes",    goal: 56, spawn: 0.85, mix: [["crawler", 1], ["runner", 3], ["brute", 2], ["wisp", 3], ["hollow", 2]], speed: 1.32, cap: 15 },
+  { name: "Ash Meadow",         goal: 60, spawn: 0.83, mix: [["crawler", 1], ["runner", 2], ["brute", 2], ["wisp", 4], ["hollow", 2]], speed: 1.34, cap: 16 },
+  { name: "Winter Gate",        goal: 64, spawn: 0.81, mix: [["runner", 2], ["brute", 3], ["wisp", 4], ["hollow", 3]], speed: 1.36, cap: 16 },
+  { name: "Mother's Hearth",    goal: 68, spawn: 0.79, mix: [["runner", 2], ["brute", 3], ["wisp", 4], ["hollow", 3]], speed: 1.38, cap: 17 },
+  { name: "The Hollow Emperor", boss: true, btype: "emperor", bossHp: 1900, goal: 1, spawn: 4.0, mix: [["wisp", 2], ["crawler", 1], ["runner", 1]], speed: 1.2, cap: 8 },
+];
+const goalText = c => c.boss ? "Slay the boss" : `Slay ${c.goal} shadows`;
+
+/* ---------- story (mirrors story.gd). One string per page, \n for line breaks. ---------- */
+const STORY = {
+  TAGLINE: "A lantern. A promise. A long, dark road.",
+  ACT_NAMES: ["ACT I: THE SEARCH", "ACT II: THE QUIET", "ACT III: WHAT THE NIGHT KEPT", "ACT IV: THE LAST LIGHT"],
+  PROLOGUE: [
+      "Every dusk, the village of Hollowmere\nlit its lanterns, to keep the dark from the doors.",
+      "One winter, a boy named Tam\nfollowed a firefly into the forest.\nHe did not come back.",
+      "His mother, Elin, took the family lantern\nand walked in after him.\nShe did not come back either.",
+      "The lantern kept burning.\nIt does not know for how long.\nIt only remembers it was lit to bring someone home.",
+      "Keep the flame alive.\nKeep walking.",
+  ],
+  INTRO: {
+      0: ["ACT I: THE SEARCH\n\nThe forest remembers every light that ever entered it.\nMost of them went out."],
+      3: [
+          "A figure stands at the gate,\nhis armour rusted to his bones.",
+          "@king:Turn back, little light.\nI was meant to guard this door.",
+          "@king:I looked away for one breath.\n...One breath.",
+      ],
+      4: ["ACT II: THE QUIET\n\nPast the gate, the trees stop whispering.\nEven the shadows seem tired."],
+      7: [
+          "A voice like a lullaby.",
+          "@mother:Hush, little ember.\nCome in from the cold.",
+          "@mother:They all come to me in the end.\nI only wanted them not to be alone.",
+      ],
+      8: ["ACT III: WHAT THE NIGHT KEPT\n\nThings lost in the dark do not vanish.\nThe night keeps them, and it is lonely."],
+      13: [
+          "A bell tolls, slow and cracked.\nThe ringer's hands are worn to the bone.",
+          "@warden:I rang for seven nights.\nNo one answered.",
+          "@warden:I never stopped ringing.\nI don't know how to stop.",
+      ],
+      14: ["ACT IV: THE LAST LIGHT\n\nHollowmere. Every door is open. Every window is dark.\nYour flame is smaller now. Keep going."],
+      19: [
+          "At the heart of the forest sits the Hollow Emperor,\non a throne of cold, dead lanterns.\nEvery light the forest ever swallowed is set in his crown.",
+          "Elin kneels beside the throne,\nholding a lantern that is not lit.",
+          "@emperor:Another little light.\nHow sweet.",
+          "@emperor:Kneel, and be still.\nOut here, nothing comes home.",
+      ],
+  },
+  MEMORY: [
+      ["A small wool mitten, stiff with frost.\nThe stitching is Elin's.\nYou light it for a moment, then walk on."],
+      ["Moss has grown over a wooden toy bird.\nSomeone whittled it with great care.\nSomeone is missing it."],
+      ["Footprints, half-buried in the leaves.\nTwo sets: small ones, and larger ones close behind.\nThey stop at the same place."],
+      [
+          "The King kneels, and his armour falls to ash.",
+          "@king:She walked through after the boy.\nI could not stop her. I could not follow.",
+          "@king:Tell her... I am sorry.",
+          "The gate stands open.\nBehind you, it will never close again.",
+      ],
+      ["The trees are silent here.\nA lullaby hangs in the air, with its last line missing."],
+      ["A chalk drawing on a flat stone:\na house, a mother, a boy, a lantern.\nThe rain has taken the boy's face."],
+      ["A frozen pond.\nUnder the ice, a firefly, still glowing\nafter all these years."],
+      [
+          "She fades into the dark like breath on glass.",
+          "@mother:He was never with me, little ember.\nI looked. I looked everywhere.",
+          "She weeps, and the trees weep with her.\n\nSomewhere ahead, a bell begins to toll.",
+      ],
+      ["Candles still burn in the flooded chapel,\nfloating on the black water.\nPeople came here to pray for the lost.\nThe water kept the prayers."],
+      ["Hundreds of lanterns hang from the branches, every one gone cold.\nEach was carried here by someone searching.\nYou are the only one still burning."],
+      ["Tam's name is carved in the oldest apple tree,\nwith a mark beside it for his height.\nHe was this tall. He was this tall."],
+      ["A child's cot sits in the middle of the road,\nas if someone carried it this far and could not go on.\nThe blanket is the colour of Elin's shawl."],
+      ["The bell rope is worn smooth,\nstained dark where hands held it.\nEvery night, someone rang until they could not."],
+      [
+          "The bell cracks, and falls silent\nfor the first time in years.",
+          "@warden:Thank you.\nI could not stop... until someone listened.",
+          "The silence is enormous.\nIt is almost kind.",
+      ],
+      ["Hollowmere. Every door open, every hearth cold.\nA table set for three,\nwith dust on every plate."],
+      ["Lamp posts line the lane, unlit.\nYou lean toward the nearest one. It flickers once, and goes dark.\nYou are not enough. You keep walking."],
+      ["A meadow of grey grass and pale ash.\nWhere the ash is thickest, a single footprint, then none.\nShe stopped walking here."],
+      ["Elin's shawl hangs on the Winter Gate, white with frost.\nIt still smells of woodsmoke.\nYou were warmer once."],
+      ["A hearth built from forest stones,\na child's drawing pinned above it.\nElin sat here with you for seven winters, telling the dark\nthe same words: \"He'll come home. He'll come home.\""],
+      [],  // the last level plays ENDING instead
+  ],
+  ENDING: [
+      "The Emperor's crown splits.\nA hundred stolen lights spill out\nand drift upward, like sparks from a fire.",
+      "@emperor:I only wanted the dark...\nto stop being lonely.",
+      "Then he is only shadow, and then nothing.",
+      "Elin lifts her head.\nHer face is pale and tired, so tired.",
+      "@elin:You kept burning.\nAll this time.",
+      "@elin:I looked for him until I forgot the way home.",
+      "@elin:He is not out here, little light.\nHe never was.",
+      "@elin:He is in the song.\nHe is in the door we leave open.",
+      "Your oil is nearly spent.\nYou lean close and light her lantern,\nthe way you lit her face every evening, at home.\nThen, softly, you go out.",
+      "Morning comes to Hollowmere.\nElin walks home with a lantern in her hand.\nIn every window, a light stays lit.\nNo one remembers who began it, or why.",
+      "THE END\n\nThank you for carrying the light.",
+  ],
+  // Shown on the "light went out" screen, by act.
+  LOSE_LINES: [
+    ["The flame sinks low. Somewhere, a lullaby loses its last line again.", "The dark is patient. So is a small light."],
+    ["The quiet closes in. Even sorrow gets tired.", "Rest a moment. The road is still there."],
+    ["The night keeps what it takes. Do not let it keep you.", "One more try. Someone is still waiting."],
+    ["So close to the end of the road. So far from home.", "She is out there. Light the way."],
+  ],
+};
+const actOf = i => i < 4 ? 0 : i < 8 ? 1 : i < 14 ? 2 : 3;
+
+/* ---------- save (key kept from the first web release so old saves survive) ---------- */
+const SAVE_KEY = "ember_drift_save_v1";
+function defaultSave() {
+  return { shards: 0, cleared: [], up: Object.fromEntries(UPGRADES.map(u => [u.key, 0])), mem: [], intro: [], prologue: false };
+}
+function levelList(v) {
+  if (!Array.isArray(v)) return [];
+  const out = [];
+  for (const x of v) { const i = parseInt(x); if (Number.isFinite(i) && i >= 0 && i < LEVELS.length && !out.includes(i)) out.push(i); }
+  return out;
+}
+function loadSave() {
+  const d = defaultSave();
+  try {
+    const raw = JSON.parse(localStorage.getItem(SAVE_KEY) || "null");
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      d.shards = Math.max(0, parseInt(raw.shards) || 0);
+      d.cleared = levelList(raw.cleared).sort((a, b) => a - b);
+      d.prologue = !!raw.prologue;
+      d.mem = levelList(raw.mem);
+      d.intro = levelList(raw.intro);
+      const up = raw.up && typeof raw.up === "object" ? raw.up : {};
+      for (const u of UPGRADES) d.up[u.key] = clamp(parseInt(up[u.key]) || 0, 0, u.max);
+    }
+  } catch (e) {}
+  return d;
+}
+function writeSave() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(save)); } catch (e) {} }
+
+/* ---------- sound (tiny synth, starts after first tap/key) ---------- */
+let AC = null, muted = false, lastShot = 0;
+function audioInit() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AC = null; } }
+  if (AC && AC.state === "suspended") AC.resume().catch(() => {});
+  musicStart();
+}
+function tone(f0, f1, dur, type, vol, delay) {
+  if (muted || !AC) return;
+  const t = AC.currentTime + (delay || 0), o = AC.createOscillator(), g = AC.createGain();
+  o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(AC.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+function sfx(k) {
+  if (!AC || muted) return;
+  switch (k) {
+    case "shoot": { const n = performance.now(); if (n - lastShot < 70) return; lastShot = n; tone(620, 260, 0.08, "square", 0.025); break; }
+    case "hit": tone(180, 70, 0.1, "sawtooth", 0.05); break;
+    case "kill": tone(260, 40, 0.28, "sawtooth", 0.07); break;
+    case "pickup": tone(600, 1100, 0.16, "sine", 0.07); break;
+    case "hurt": tone(140, 45, 0.35, "sawtooth", 0.09); break;
+    case "dash": tone(300, 800, 0.16, "triangle", 0.06); break;
+    case "buy": tone(500, 900, 0.1, "square", 0.04); tone(800, 1200, 0.12, "square", 0.04, 0.09); break;
+    case "toll": tone(150, 110, 0.9, "sine", 0.16); tone(74, 70, 0.5, "sine", 0.1, 0.9); break;
+    case "win": [523, 659, 784, 1046].forEach((f, i) => tone(f, f, 0.22, "triangle", 0.07, i * 0.12)); break;
+    case "lose": [330, 262, 196, 147].forEach((f, i) => tone(f, f * 0.9, 0.3, "sawtooth", 0.05, i * 0.18)); break;
+    case "click": tone(440, 520, 0.05, "square", 0.03); break;
+  }
+}
+
+/* ---------- music: the Hollow Forest theme, synthesised and looped with a look-ahead scheduler ---------- */
+const THEME = {
+  bpm: 54, bars: 12, len: 53.333333333333336,
+  chords: [[45, [57, 60, 64]], [41, [57, 60, 65]], [48, [55, 60, 64]], [43, [55, 59, 62]], [45, [57, 60, 64]], [41, [57, 60, 65]],
+           [50, [57, 62, 65]], [40, [56, 59, 64]], [45, [57, 60, 64]], [41, [57, 60, 65]], [50, [57, 62, 65]], [40, [56, 59, 64]]],
+  mel: [[0.0, 76, 2.222], [2.222, 74, 1.111], [3.333, 72, 1.111], [4.444, 69, 3.333], [7.778, 72, 1.111], [8.889, 76, 2.222],
+        [11.111, 72, 2.222], [13.333, 74, 3.333], [16.667, 71, 1.111], [17.778, 72, 2.222], [20.0, 69, 1.111], [21.111, 71, 1.111],
+        [22.222, 72, 3.333], [25.556, 69, 1.111], [26.667, 74, 2.222], [28.889, 77, 2.222], [31.111, 76, 4.444], [35.556, 81, 2.222],
+        [37.778, 79, 1.111], [38.889, 76, 1.111], [40.0, 77, 3.333], [43.333, 76, 1.111], [44.444, 74, 2.222], [46.667, 72, 2.222],
+        [48.889, 71, 2.222], [51.111, 68, 2.222]],
+};
+const MUSIC_GAIN = 0.12, LOOKAHEAD = 1.5;
+const BAR = 4 * 60 / THEME.bpm;
+const hz = m => 440 * Math.pow(2, (m - 69) / 12);
+let music = null;   // { bus, dry, send, t0, ci, mi, timer, notes }
+function musicStart() {
+  if (!AC || muted || document.hidden || music) return;
+  const bus = AC.createGain();
+  bus.gain.setValueAtTime(0, AC.currentTime); bus.gain.linearRampToValueAtTime(MUSIC_GAIN, AC.currentTime + 1.5);
+  const dry = AC.createGain(), send = AC.createGain(), delay = AC.createDelay(2), fb = AC.createGain(), lp = AC.createBiquadFilter();
+  send.gain.value = 0.32; delay.delayTime.value = BAR * 3 / 16; fb.gain.value = 0.38;
+  lp.type = "lowpass"; lp.frequency.value = 1800;
+  dry.connect(bus); send.connect(delay); delay.connect(lp); lp.connect(fb); fb.connect(delay); lp.connect(bus);
+  bus.connect(AC.destination);
+  music = { bus, dry, send, t0: AC.currentTime + 0.15, ci: 0, mi: 0, timer: null, notes: 0 };
+  music.timer = setInterval(musicTick, 200);
+  musicTick();
+}
+function musicStop() {
+  if (!music) return;
+  const m = music; music = null;
+  clearInterval(m.timer);
+  try {
+    const now = AC.currentTime;
+    m.bus.gain.cancelScheduledValues(now); m.bus.gain.setValueAtTime(m.bus.gain.value, now); m.bus.gain.linearRampToValueAtTime(0, now + 0.25);
+    setTimeout(() => { try { m.bus.disconnect(); } catch (e) {} }, 400);
+  } catch (e) {}
+}
+function musicTick() {
+  if (!music || !AC) return;
+  if (AC.state !== "running") return;   // nothing would sound yet; keep the timeline anchored instead
+  const now = AC.currentTime, horizon = now + LOOKAHEAD, m = music;
+  if (m.t0 + Math.min(m.ci * BAR, m.mi < THEME.mel.length ? THEME.mel[m.mi][0] : 1e9) < now - 0.25) {
+    m.t0 = now + 0.1; m.ci = 0; m.mi = 0;   // fell behind (timer throttled): restart the loop cleanly
+  }
+  for (let guard = 0; guard < 200; guard++) {
+    if (m.ci >= THEME.bars && m.mi >= THEME.mel.length) { m.t0 += THEME.len; m.ci = 0; m.mi = 0; continue; }
+    const tc = m.ci < THEME.bars ? m.t0 + m.ci * BAR : Infinity;
+    const tm = m.mi < THEME.mel.length ? m.t0 + THEME.mel[m.mi][0] : Infinity;
+    if (Math.min(tc, tm) >= horizon) break;
+    if (tc <= tm) { const [b, pads] = THEME.chords[m.ci]; playChord(tc, b, pads, BAR); m.ci++; }
+    else { const [, n, d] = THEME.mel[m.mi]; playPluck(tm, n, d); m.mi++; }
+    m.notes++;
+  }
+}
+function envNode(dest, t, peak, attack, hold, release) {
+  const g = AC.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(peak, t + attack);
+  g.gain.setValueAtTime(peak, t + hold);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + hold + release);
+  for (const d of dest) g.connect(d);
+  return g;
+}
+function osc(type, f, detune, t, stop, dest) {
+  const o = AC.createOscillator(); o.type = type; o.frequency.value = f; o.detune.value = detune;
+  o.connect(dest); o.start(t); o.stop(stop);
+}
+function playChord(t, bass, pads, dur) {
+  const m = music;
+  // bass: a sine with a slow swell
+  const gb = envNode([m.dry], t, 0.5, 1.2, dur - 0.2, 1.0);
+  osc("sine", hz(bass), 0, t, t + dur + 1.0, gb);
+  // pads: quiet, slightly detuned sine + triangle pairs
+  for (const p of pads) {
+    const gp = envNode([m.dry, m.send], t, 0.055, 1.6, dur - 0.3, 1.3);
+    osc("sine", hz(p), -6, t, t + dur + 1.2, gp);
+    osc("triangle", hz(p), 6, t, t + dur + 1.2, gp);
+  }
+}
+function playPluck(t, n, dur) {
+  const m = music, g = AC.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(0.3, t + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 1.4);
+  g.connect(m.dry); g.connect(m.send);
+  osc("sine", hz(n), 0, t, t + 1.5, g);
+  const h = AC.createGain(); h.gain.value = 0.18; h.connect(g);
+  osc("sine", hz(n) * 2, 0, t, t + 1.5, h);
+}
+function setMuted(v) {
+  muted = v;
+  if (muted) musicStop(); else musicStart();
+}
+function toggleMute() { setMuted(!muted); }
+
+/* =====================================================================
+   LOGIC (mirrors session.gd)
+   ===================================================================== */
+class Session {
+  constructor(idx, st) {
+    this.idx = idx; this.cfg = LEVELS[idx]; this.st = st;
+    this.p = { x: W / 2, y: H / 2 + 60 };
+    this.facing = { x: 1, y: 0 }; this.aim = { x: 1, y: 0 }; this.dashDir = { x: 1, y: 0 };
+    this.oil = st.maxOil; this.kills = 0; this.goal = this.cfg.goal; this.shards = 0; this.bonus = 0;
+    this.time = 0; this.t = 0;
+    this.mons = []; this.bolts = []; this.pickups = []; this.parts = []; this.floaters = [];
+    this.orbs = [];    // stolen-light orbs (emperor): {x, y, vx, vy, life, r}
+    this.rings = [];   // bell shockwaves (warden): {x, y, r, speed, hit}
+    this.marker = null; // where the emperor will blink to, while telegraphing
+    this.fireCd = 0; this.dashT = 0; this.dashCd = 0; this.hurtT = 0; this.shake = 0;
+    this.dashHit = new Set();
+    this.spawnT = 1.2; this.pickT = 2.0;
+    this.result = null; this.resultT = 0; this.nextId = 1; this.credited = false; this.boss = null;
+    if (this.cfg.boss) this.boss = this.spawnMon("boss", { x: W / 2, y: 90 });
+    for (let i = 0; i < 2; i++) this.spawnPickup();
+  }
+  get radius() {
+    const frac = Math.max(0, this.oil) / this.st.maxOil;
+    const flicker = Math.sin(this.t * 11) * 3 + Math.sin(this.t * 5.3) * 4;
+    return 60 + this.st.radiusBonus + 190 * Math.pow(frac, 0.8) + flicker;
+  }
+  burst(pos, color, n = 14, speed = 160, life = 0.6, size = 4) {
+    if (this.parts.length > 700) return;
+    for (let i = 0; i < n; i++) {
+      const a = rand(0, TAU), s = rand(0.3, 1) * speed;
+      this.parts.push({ x: pos.x, y: pos.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: life * rand(0.6, 1.2), max: life, color, size });
+    }
+  }
+  floatText(pos, text, color) { this.floaters.push({ x: pos.x, y: pos.y, t: 0.9, text, color }); }
+  edgePos() {
+    switch (randi(0, 3)) {
+      case 0: return { x: rand(0, W), y: -30 };
+      case 1: return { x: W + 30, y: rand(0, H) };
+      case 2: return { x: rand(0, W), y: H + 30 };
+      default: return { x: -30, y: rand(0, H) };
+    }
+  }
+  spawnMon(kind, pos) {
+    const b = MON[kind], isBoss = kind === "boss", btype = this.cfg.btype || "king";
+    const hp = isBoss ? (this.cfg.bossHp || b.hp) : b.hp * (1 + 0.1 * this.idx);
+    const col = isBoss ? BOSS_COL[btype] : b.col;
+    const m = { id: this.nextId++, kind, pos: { x: pos.x, y: pos.y }, hp, maxhp: hp, r: b.r, speed: b.speed * this.cfg.speed,
+      dmg: b.dmg * (isBoss ? 1 : 1 + 0.09 * this.idx), shards: b.shards, colA: col, col: rgb(col), ph: rand(0, 6.28), flash: 0,
+      state: "walk", stT: 0, cd: 2.5, dir: { x: 1, y: 0 },
+      btype: isBoss ? btype : "", blink: 6.0, second: -1, tgt: { x: 0, y: 0 } };
+    this.mons.push(m);
+    return m;
+  }
+  spawnPickup(pos) {
+    if (!pos) {
+      for (let i = 0; i < 15; i++) {
+        const c = { x: rand(50, W - 50), y: rand(110, H - 50) };
+        if (dist(c, this.p) > 130) { pos = c; break; }
+      }
+    }
+    if (pos) this.pickups.push({ x: pos.x, y: pos.y, ph: rand(0, 6.28), life: 13 });
+  }
+  minions() { return this.mons.filter(m => m.kind !== "boss").length; }
+
+  update(dt, move, aim, fire, dash) {
+    this.t += dt;
+    this.updateFx(dt);
+    if (this.result) { this.resultT += dt; return; }
+    this.time += dt;
+    const st = this.st;
+    let mv = { x: move.x, y: move.y };
+    const ml = Math.hypot(mv.x, mv.y);
+    if (ml > 0) { if (ml > 1) mv = { x: mv.x / ml, y: mv.y / ml }; this.facing = norm(mv.x, mv.y); }
+    if (aim && (aim.x || aim.y)) this.aim = norm(aim.x, aim.y); else this.aim = { x: this.facing.x, y: this.facing.y };
+    if (dash && this.dashCd <= 0 && this.dashT <= 0) {
+      this.dashT = 0.2; this.dashCd = st.dashCd;
+      this.dashDir = ml > 0 ? norm(mv.x, mv.y) : { x: this.facing.x, y: this.facing.y };
+      this.dashHit = new Set();
+      this.burst(this.p, CREAM, 10, 120, 0.3, 3); sfx("dash");
+    }
+    if (this.dashT > 0) {
+      this.dashT -= dt;
+      this.p.x += this.dashDir.x * 700 * dt; this.p.y += this.dashDir.y * 700 * dt;
+      this.parts.push({ x: this.p.x, y: this.p.y, vx: 0, vy: 0, life: 0.25, max: 0.25, color: CREAM, size: 6 });
+    } else { this.p.x += mv.x * st.speed * dt; this.p.y += mv.y * st.speed * dt; }
+    this.p.x = clamp(this.p.x, 14, W - 14); this.p.y = clamp(this.p.y, 14, H - 14);
+    this.dashCd = Math.max(0, this.dashCd - dt); this.hurtT = Math.max(0, this.hurtT - dt);
+    this.fireCd = Math.max(0, this.fireCd - dt); this.shake = Math.max(0, this.shake - dt * 30);
+
+    this.oil -= st.burn * (1 + 0.04 * this.idx) * dt;
+    if (this.oil <= 0) { this.finish("lose"); return; }
+
+    if (fire && this.fireCd <= 0 && this.oil > 3) this.shoot();
+    if (Math.random() < 0.5) {
+      this.parts.push({ x: this.p.x + this.aim.x * 18 + rand(-3, 3), y: this.p.y + this.aim.y * 18 - 6, vx: rand(-10, 10), vy: rand(-45, -15),
+        life: 0.4, max: 0.4, color: EMBER_HOT, size: 3 });
+    }
+    this.updateBolts(dt); if (this.result) return;
+    this.updateHazards(dt); if (this.result) return;
+    this.updatePickups(dt);
+    this.spawnMonsters(dt);
+    this.updateMonsters(dt);
+  }
+  shoot() {
+    const n = this.st.bolts, base = Math.atan2(this.aim.y, this.aim.x);
+    for (let i = 0; i < n; i++) {
+      const a = base + (i - (n - 1) / 2) * 0.16, d = { x: Math.cos(a), y: Math.sin(a) };
+      this.bolts.push({ x: this.p.x + d.x * 16, y: this.p.y + d.y * 16, vx: d.x * 640, vy: d.y * 640, life: 0.9, dmg: this.st.damage });
+    }
+    this.oil -= SHOT_OIL; this.fireCd = this.st.fireCd; sfx("shoot");
+  }
+  updateBolts(dt) {
+    for (let i = this.bolts.length - 1; i >= 0; i--) {
+      const b = this.bolts[i];
+      b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+      if (b.life <= 0 || b.x < -20 || b.x > W + 20 || b.y < -20 || b.y > H + 20) { this.bolts.splice(i, 1); continue; }
+      let shotOrb = false;
+      for (let oi = this.orbs.length - 1; oi >= 0; oi--) {   // bolts can shoot stolen lights down
+        const o = this.orbs[oi];
+        if (dist(b, o) < o.r + 7) {
+          this.burst(o, ORB, 8, 120, 0.35, 3);
+          this.orbs.splice(oi, 1); this.bolts.splice(i, 1); sfx("hit");
+          shotOrb = true; break;
+        }
+      }
+      if (shotOrb) continue;
+      for (const m of this.mons.slice()) {
+        if (dist(b, m.pos) < m.r + 7) {
+          this.bolts.splice(i, 1);
+          this.burst(b, EMBER, 6, 120, 0.3, 3);
+          const n = norm(b.vx, b.vy);
+          this.hitMon(m, b.dmg, n);
+          break;
+        }
+      }
+      if (this.result) return;
+    }
+  }
+  updatePickups(dt) {
+    this.pickT -= dt;
+    if (this.pickT <= 0) { this.pickT = rand(2.8, 4.2); if (this.pickups.length < 4) this.spawnPickup(); }
+    for (let i = this.pickups.length - 1; i >= 0; i--) {
+      const pk = this.pickups[i];
+      pk.life -= dt;
+      if (pk.life <= 0) this.pickups.splice(i, 1);
+      else if (dist(pk, this.p) < 28) {
+        this.pickups.splice(i, 1);
+        this.oil = Math.min(this.st.maxOil, this.oil + OIL_PICKUP);
+        this.burst(pk, EMBER, 16, 180, 0.7, 4); this.floatText(pk, "+OIL", EMBER_HOT); sfx("pickup");
+      }
+    }
+  }
+  spawnMonsters(dt) {
+    const cfg = this.cfg;
+    if (cfg.boss) return;   // boss nights are a duel: no other shadows
+    this.spawnT -= dt;
+    if (this.spawnT > 0) return;
+    this.spawnT = cfg.spawn * rand(0.8, 1.2);
+    const alive = this.minions();
+    if (alive >= cfg.cap) return;
+    if (this.kills + alive >= this.goal) return;
+    const total = cfg.mix.reduce((a, [, w]) => a + w, 0);
+    let r = Math.random() * total, kind = cfg.mix[0][0];
+    for (const [k, w] of cfg.mix) { if ((r -= w) <= 0) { kind = k; break; } }
+    this.spawnMon(kind, this.edgePos());
+  }
+  updateMonsters(dt) {
+    for (const m of this.mons.slice()) {
+      if (!this.mons.includes(m)) continue;
+      m.flash = Math.max(0, m.flash - dt);
+      let to = { x: this.p.x - m.pos.x, y: this.p.y - m.pos.y }, d = Math.hypot(to.x, to.y);
+      if (m.kind === "boss") this.bossAi(m, to, d, dt);
+      else if (d > 1) {
+        const wisp = m.kind === "wisp";
+        const dir = { x: to.x / d, y: to.y / d }, w = Math.sin(this.t * (wisp ? 6 : 3) + m.ph) * (wisp ? 1.2 : 0.45);
+        const v = norm(dir.x + -dir.y * w, dir.y + dir.x * w);
+        m.pos.x += v.x * m.speed * dt; m.pos.y += v.y * m.speed * dt;
+        for (const o of this.mons) {   // keep monsters from stacking on top of each other
+          if (o === m) continue;
+          const dx = m.pos.x - o.pos.x, dy = m.pos.y - o.pos.y, dd = Math.hypot(dx, dy), lim = (m.r + o.r) * 0.8;
+          if (dd > 0 && dd < lim) { m.pos.x += dx / dd * (lim - dd) * 0.5; m.pos.y += dy / dd * (lim - dd) * 0.5; }
+        }
+      }
+      to = { x: this.p.x - m.pos.x, y: this.p.y - m.pos.y }; d = Math.hypot(to.x, to.y);
+      if (d < m.r + PLAYER_R) {
+        if (this.dashT > 0) {
+          if (!this.dashHit.has(m.id)) {
+            this.dashHit.add(m.id);
+            const push = d > 0 ? { x: -to.x / d, y: -to.y / d } : { x: 1, y: 0 };
+            this.hitMon(m, this.st.dashDmg, push);
+          }
+        } else if (this.hurtT <= 0) this.hurtPlayer(m.dmg, m.pos);
+      }
+      if (this.result) return;
+    }
+  }
+  bossAi(m, to, d, dt) {
+    if (m.btype === "warden") this.bossWarden(m, to, d, dt);
+    else if (m.btype === "emperor") this.bossEmperor(m, to, d, dt);
+    else this.bossCharge(m, to, d, dt);
+  }
+  clampBoss(m) { m.pos.x = clamp(m.pos.x, m.r, W - m.r); m.pos.y = clamp(m.pos.y, m.r, H - m.r); }
+  // Hollow King and Night Mother: walk, telegraph with a red line, then charge.
+  bossCharge(m, to, d, dt) {
+    const rage = m.hp < m.maxhp * 0.5;
+    if (m.state === "walk") {
+      if (d > 1) { const s = m.speed * (rage ? 1.35 : 1) * dt; m.pos.x += to.x / d * s; m.pos.y += to.y / d * s; }
+      m.cd -= dt;
+      if (m.cd <= 0) { m.state = "wind"; m.stT = 0.85; }
+    } else if (m.state === "wind") {
+      m.stT -= dt;
+      if (m.stT > 0.3 && d > 1) m.dir = { x: to.x / d, y: to.y / d };
+      if (m.stT <= 0) { m.state = "charge"; m.stT = 0.6; }
+    } else {
+      const s = (rage ? 620 : 540) * dt;
+      m.pos.x += m.dir.x * s; m.pos.y += m.dir.y * s; m.stT -= dt;
+      if (m.stT <= 0) { m.state = "walk"; m.cd = rage ? 2.2 : 3.2; }
+    }
+    this.clampBoss(m);
+  }
+  // Bell Warden: lumbers after you, then tolls. A shockwave ring sweeps outward;
+  // dash through it (or stay out of its band) to avoid the hit.
+  bossWarden(m, to, d, dt) {
+    const rage = m.hp < m.maxhp * 0.5;
+    if (d > 150) { const s = m.speed * (rage ? 1.3 : 1) * dt; m.pos.x += to.x / d * s; m.pos.y += to.y / d * s; }
+    if (m.state === "walk") {
+      m.cd -= dt;
+      if (m.cd <= 0) { m.state = "wind"; m.stT = 0.9; }
+    } else {
+      m.stT -= dt;
+      if (m.stT <= 0) {
+        m.state = "walk"; m.cd = rage ? 2.6 : 3.6;
+        this.ringFrom(m.pos, rage ? 250 : 220);
+        if (rage) m.second = 0.6;
+      }
+    }
+    if (m.second > 0) { m.second -= dt; if (m.second <= 0) this.ringFrom(m.pos, 250); }
+    this.clampBoss(m);
+  }
+  ringFrom(pos, speed) {
+    this.rings.push({ x: pos.x, y: pos.y, r: 40, speed, hit: false });
+    this.shake = Math.max(this.shake, 8);
+    sfx("toll");
+  }
+  // The Hollow Emperor: keeps his distance and hurls stolen lights at you; blinks across
+  // the room and scatters a ring of them. Shoot orbs down or dash through them.
+  bossEmperor(m, to, d, dt) {
+    const rage = m.hp < m.maxhp * 0.5;
+    if (m.state === "walk") {
+      const sp = m.speed * (rage ? 1.25 : 1);
+      if (d > 1) {
+        const dir = { x: to.x / d, y: to.y / d };
+        if (d > 270) { m.pos.x += dir.x * sp * dt; m.pos.y += dir.y * sp * dt; }
+        else if (d < 190) { m.pos.x -= dir.x * sp * dt; m.pos.y -= dir.y * sp * dt; }
+        const side = Math.sin(this.t * 0.9) * sp * 0.7 * dt;
+        m.pos.x += -dir.y * side; m.pos.y += dir.x * side;
+      }
+      m.cd -= dt;
+      if (m.cd <= 0 && d > 1) {
+        m.cd = rage ? 1.6 : 2.3;
+        const n = rage ? 5 : 3, base = Math.atan2(to.y, to.x), sp2 = rage ? 205 : 175;
+        for (let i = 0; i < n; i++) {
+          const a = base + (i - (n - 1) / 2) * 0.26;
+          this.orbs.push({ x: m.pos.x, y: m.pos.y, vx: Math.cos(a) * sp2, vy: Math.sin(a) * sp2, life: 7, r: 9 });
+        }
+        sfx("shoot");
+      }
+      m.blink -= dt;
+      if (m.blink <= 0) {
+        m.state = "blink"; m.stT = 0.9;
+        let tgt = { x: m.pos.x, y: m.pos.y };
+        for (let i = 0; i < 12; i++) {
+          const c = { x: rand(90, W - 90), y: rand(150, H - 90) };
+          tgt = c;
+          if (dist(c, this.p) > 260) break;
+        }
+        m.tgt = tgt; this.marker = { x: tgt.x, y: tgt.y };
+      }
+    } else {
+      m.stT -= dt;
+      if (m.stT <= 0) {
+        this.burst(m.pos, ORB, 24, 220, 0.6, 4);
+        m.pos = { x: m.tgt.x, y: m.tgt.y };
+        this.marker = null;
+        this.burst(m.pos, ORB, 30, 260, 0.7, 4);
+        const n2 = rage ? 14 : 10, a0 = Math.random() * TAU;
+        for (let i = 0; i < n2; i++) {
+          const a2 = a0 + TAU * i / n2;
+          this.orbs.push({ x: m.pos.x, y: m.pos.y, vx: Math.cos(a2) * 135, vy: Math.sin(a2) * 135, life: 7, r: 9 });
+        }
+        m.state = "walk"; m.blink = rage ? 5 : 7; m.cd = 1.0;
+        sfx("toll");
+      }
+    }
+    this.clampBoss(m);
+  }
+  updateHazards(dt) {
+    for (let i = this.orbs.length - 1; i >= 0; i--) {
+      const o = this.orbs[i];
+      o.x += o.vx * dt; o.y += o.vy * dt; o.life -= dt;
+      if (o.life <= 0 || o.x < -30 || o.x > W + 30 || o.y < -30 || o.y > H + 30) { this.orbs.splice(i, 1); continue; }
+      if (dist(o, this.p) < o.r + PLAYER_R) {
+        if (this.dashT > 0) { this.burst(o, ORB, 8, 120, 0.35, 3); this.orbs.splice(i, 1); }
+        else if (this.hurtT <= 0) {
+          this.orbs.splice(i, 1);
+          this.hurtPlayer(18, o);
+          if (this.result) return;
+        }
+      }
+    }
+    for (let i = this.rings.length - 1; i >= 0; i--) {
+      const rg = this.rings[i];
+      rg.r += rg.speed * dt;
+      if (rg.r > 1100) { this.rings.splice(i, 1); continue; }
+      if (!rg.hit && this.dashT <= 0 && this.hurtT <= 0 && Math.abs(dist(this.p, rg) - rg.r) < 18) {
+        rg.hit = true;
+        this.hurtPlayer(26, rg);
+        if (this.result) return;
+      }
+    }
+  }
+  hitMon(m, dmg, push) {
+    if (!this.mons.includes(m)) return;
+    m.hp -= dmg; m.flash = 0.12;
+    const k = m.kind === "boss" ? 3 : 10;
+    m.pos.x += push.x * k; m.pos.y += push.y * k;
+    sfx("hit");
+    if (m.hp <= 0) this.killMon(m);
+  }
+  killMon(m) {
+    this.mons.splice(this.mons.indexOf(m), 1);
+    const big = m.kind === "boss" || m.kind === "brute";
+    this.burst(m.pos, "#aa50d2", big ? 40 : 22, 260, 0.8, 5);
+    this.shards += m.shards; this.floatText(m.pos, `+${m.shards}`, EMBER_HOT);
+    this.shake = Math.max(this.shake, big ? 10 : 4); sfx("kill");
+    if (m.kind === "boss") { this.finish("win"); return; }
+    if (Math.random() < 0.35) this.spawnPickup(m.pos);
+    if (!this.cfg.boss) { this.kills++; if (this.kills >= this.goal) this.finish("win"); }
+  }
+  hurtPlayer(dmg, src) {
+    this.oil -= dmg; this.hurtT = 0.9; this.shake = 12;
+    this.burst(this.p, DANGER, 18, 200, 0.5, 4); this.floatText(this.p, `-${Math.floor(dmg)} OIL`, DANGER); sfx("hurt");
+    const away = { x: this.p.x - src.x, y: this.p.y - src.y }, l = Math.hypot(away.x, away.y);
+    if (l > 1) { this.p.x += away.x / l * 45; this.p.y += away.y / l * 45; }
+    this.p.x = clamp(this.p.x, 14, W - 14); this.p.y = clamp(this.p.y, 14, H - 14);
+    if (this.oil <= 0) this.finish("lose");
+  }
+  finish(result) {
+    if (this.result) return;
+    this.result = result; this.resultT = 0;
+    if (result === "win") {
+      this.bonus = 10 + 5 * this.idx + (this.cfg.boss ? 40 : 0);
+      for (const m of this.mons) this.burst(m.pos, "#aa50d2", 14, 200, 0.6, 4);
+      this.mons.length = 0; this.bolts.length = 0; this.orbs.length = 0; this.rings.length = 0; this.marker = null;
+      this.burst(this.p, EMBER_HOT, 60, 320, 1.2, 5); sfx("win");
+    } else { this.oil = 0; this.burst(this.p, CREAM, 50, 260, 1.2, 5); sfx("lose"); }
+  }
+  updateFx(dt) {
+    for (const p of this.parts) { p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; }
+    this.parts = this.parts.filter(p => p.life > 0);
+    for (const f of this.floaters) { f.y -= 40 * dt; f.t -= dt; }
+    this.floaters = this.floaters.filter(f => f.t > 0);
+  }
+}
+
+/* =====================================================================
+   APP: state, input, drawing (mirrors main.gd, without ads)
+   ===================================================================== */
+let save = loadSave();
+let state = "menu";      // menu | levels | shop | story | play | pause | clear | over | victory
+let S = null;            // current Session
+let hot = [];            // clickable rects registered during draw
+let T = 0;               // app clock
+let lastEarned = 0, toast = null, bought = null;
+const story = { pages: [], i: 0, t: 0, done: null, pg: null, shown: 0, typed: 0 };
+/* world map state: scroll = world y of the viewport's top edge */
+const MAP_H = 2600, MAP_SCROLL_MAX = MAP_H - H;
+const map = { scroll: MAP_SCROLL_MAX, vel: 0, anim: null, drag: null, card: null, toast: null, bg: null, bgKey: -1 };
+
+/* ---------- input ---------- */
+const keys = new Set();
+const ptr = { x: W / 2, y: H / 2, down: false, seen: false };
+let touchMode = false;
+const stick = { move: null, aim: null };   // {id, ox, oy, x, y}
+let dashReq = false;
+
+function toCanvas(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height };
+}
+const unlocked = i => i === 0 || save.cleared.includes(i - 1);
+function latestUnlocked() { let best = 0; for (let i = 0; i < LEVELS.length; i++) if (unlocked(i)) best = i; return best; }
+const highestAct = () => actOf(latestUnlocked());
+
+/* ---------- flow ---------- */
+function go(s) {
+  state = s;
+  if (s === "menu" || s === "levels" || s === "shop") {
+    setGround(highestAct());
+    if (s === "levels") mapEnter();
+  }
+  sfx("click");
+}
+function startLevel(i) {
+  S = new Session(i, computeStats(save.up));
+  setGround(actOf(i));
+  dashReq = false; stick.move = stick.aim = null; ptr.down = false;
+  state = "play";
+}
+// First time at an act opener / boss: show the story card, then start.
+function enterLevel(i) {
+  if (STORY.INTRO[i] && !save.intro.includes(i)) {
+    save.intro.push(i); writeSave();
+    showStory(STORY.INTRO[i], () => startLevel(i));
+  } else startLevel(i);
+}
+function playPressed() {
+  if (!save.prologue) {
+    save.prologue = true; writeSave(); sfx("click");
+    showStory(STORY.PROLOGUE, () => go("levels"));
+  } else go("levels");
+}
+function credit() {
+  if (!S || S.credited) return 0;
+  S.credited = true;
+  const earned = S.shards + (S.result === "win" ? S.bonus : 0);
+  save.shards += earned;
+  if (S.result === "win" && !save.cleared.includes(S.idx)) save.cleared = [...save.cleared, S.idx].sort((a, b) => a - b);
+  writeSave();
+  return earned;
+}
+function finishSession() {
+  lastEarned = credit();
+  if (S.result !== "win") { state = "over"; return; }
+  const idx = S.idx, last = idx === LEVELS.length - 1, after = last ? "victory" : "clear";
+  const pages = last ? STORY.ENDING : (STORY.MEMORY[idx] || []);
+  if (last || (pages.length > 0 && !save.mem.includes(idx))) {
+    if (!save.mem.includes(idx)) { save.mem.push(idx); writeSave(); }
+    showStory(pages, () => { state = after; });   // hold the result screen until the pages are read
+  } else state = after;
+}
+function abandon() { credit(); go("levels"); }
+function nextLevel() { if (S && S.idx + 1 < LEVELS.length) enterLevel(S.idx + 1); else go("levels"); }
+function buy(key) {
+  const u = UPG[key], lvl = save.up[key];
+  if (lvl >= u.max) return;
+  const cost = upgradeCost(u, lvl);
+  if (save.shards < cost) { toast = [`Need ${cost - save.shards} more shards`, T + 1.6]; return; }
+  save.shards -= cost; save.up[key] = lvl + 1; bought = [key, T + 0.4]; writeSave(); sfx("buy");
+}
+
+/* ---------- story pages: Undertale-style dialogue box ----------
+   A page starting with "@who:" is spoken (king/mother/warden/emperor/elin); others are narration. */
+const TYPE_CPS = 30;
+const SPEAKERS = { king: "HOLLOW KING", mother: "NIGHT MOTHER", warden: "BELL WARDEN", emperor: "HOLLOW EMPEROR", elin: "ELIN" };
+// voice blips: [f0, f1, wave, volume, seconds]
+const VOICE = { narrator: [520, 520, "square", 0.012, 0.045], king: [110, 100, "sawtooth", 0.05, 0.05], mother: [330, 350, "sine", 0.07, 0.05],
+  warden: [200, 190, "triangle", 0.07, 0.07], emperor: [85, 80, "square", 0.04, 0.06], elin: [440, 460, "sine", 0.06, 0.045] };
+let blipCount = 0, blipSounded = 0;
+function parsePage(raw) {
+  const m = /^@(king|mother|warden|emperor|elin):/.exec(raw);
+  const who = m ? m[1] : null, body = m ? raw.slice(m[0].length) : raw;
+  let lines = body.split("\n");
+  const head = !who && lines[0].startsWith("ACT ");
+  // narration: every paragraph (blank-line separated) opens with "* " (the ACT headline is a title, not a paragraph)
+  if (!who) lines = lines.map((l, i) => (l !== "" && (i === 0 || lines[i - 1] === "") && !(head && i === 0)) ? "* " + l : l);
+  const text = lines.join("\n"), times = [];
+  let t = 0;
+  for (let k = 0; k < text.length; k++) {
+    times.push(t);
+    const c = text[k];
+    t += 1 / TYPE_CPS;
+    if (".!?".includes(c) && text[k + 1] !== ".") t += 0.28;   // "..." pauses once, after its last dot
+    else if (",;:".includes(c)) t += 0.12;
+    else if (c === "\n") t += 0.06;
+  }
+  return { raw, who, head, text, times, total: t, layout: null, layoutKey: "" };
+}
+function showStory(pages, done) {
+  story.pages = pages; story.i = 0; story.done = done;
+  hot = []; state = "story"; storyPage();
+}
+function storyPage() {
+  story.t = 0; story.shown = 0; story.typed = 0;
+  story.pg = story.pages.length ? parsePage(story.pages[story.i]) : null;
+}
+const storyComplete = () => !story.pg || story.shown >= story.pg.text.length;
+function storyTick(dt) {
+  const pg = story.pg;
+  if (!pg) return;
+  story.t += dt;
+  while (story.shown < pg.text.length && pg.times[story.shown] <= story.t) {
+    const c = pg.text[story.shown++];
+    if (c !== " " && c !== "\n" && c !== "*" && ++story.typed % 2 === 1) blip(pg.who || "narrator");
+  }
+}
+function blip(who) {
+  blipCount++;
+  if (muted || !AC) return;
+  const v = VOICE[who] || VOICE.narrator;
+  blipSounded++;
+  tone(v[0], v[1], v[4], v[2], v[3]);
+}
+function storyAdvance() {
+  if (state !== "story") return;
+  if (!storyComplete()) { story.shown = story.pg.text.length; story.t = story.pg.total; return; }   // first tap completes the page
+  story.i++;
+  if (story.i >= story.pages.length) storySkip(); else { storyPage(); sfx("click"); }
+}
+function storySkip() {
+  const done = story.done;
+  story.done = null; story.pages = []; story.pg = null;
+  if (done) done(); else if (state === "story") go("menu");
+}
+
+function onKey(e) {
+  audioInit();
+  const k = e.key, accept = k === "Enter" || k === " ";
+  if (k === "m" || k === "M") { toggleMute(); return; }
+  if ([" ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown"].includes(k)) e.preventDefault();
+  if (state === "play") {
+    if (k === "p" || k === "P" || k === "Escape") state = "pause";
+    else if (k === " " || k === "Shift") dashReq = true;
+    return;
+  }
+  if (state === "story") { if (k === "Escape") storySkip(); else if (accept) storyAdvance(); }
+  else if (state === "menu") { if (accept) playPressed(); }
+  else if (state === "levels") {
+    if (k === "Escape") { if (map.card != null) map.card = null; else go("menu"); }
+    else if (k === "u" || k === "U") go("shop");
+    else if (k === "Enter") { const i = map.card != null ? map.card : latestUnlocked(); map.card = null; enterLevel(i); }
+    else if (k === "ArrowUp") mapScrollBy(-80);
+    else if (k === "ArrowDown") mapScrollBy(80);
+    else if (k === "PageUp") mapScrollBy(-480);
+    else if (k === "PageDown") mapScrollBy(480);
+  } else if (state === "shop") { if (k === "Escape" || k === "Enter") go("levels"); }
+  else if (state === "pause") { if (k === "p" || k === "P" || k === "Escape" || k === "Enter") state = "play"; }
+  else if (state === "clear") { if (accept) nextLevel(); else if (k === "Escape") go("levels"); }
+  else if (state === "over") { if (accept || k === "r" || k === "R") enterLevel(S.idx); else if (k === "Escape") go("levels"); }
+  else if (state === "victory") { if (accept || k === "Escape") go("levels"); }
+}
+const MAP_KEYS = ["ArrowUp", "ArrowDown", "PageUp", "PageDown"];
+addEventListener("keydown", e => { if (!e.repeat || (state === "levels" && MAP_KEYS.includes(e.key))) onKey(e); else if ([" ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) e.preventDefault(); keys.add(e.key.toLowerCase()); });
+addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
+addEventListener("blur", () => { keys.clear(); ptr.down = false; if (state === "play") state = "pause"; });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { if (state === "play") state = "pause"; musicStop(); }
+  else if (AC) musicStart();
+});
+
+cv.addEventListener("contextmenu", e => e.preventDefault());
+cv.addEventListener("pointerdown", e => {
+  audioInit(); cv.focus();
+  const p = toCanvas(e);
+  ptr.x = p.x; ptr.y = p.y; ptr.seen = true;
+  if (e.pointerType === "touch") touchMode = true;
+  try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+  for (const h of hot) {
+    if (p.x >= h.x && p.x <= h.x + h.w && p.y >= h.y && p.y <= h.y + h.h) { h.action(); return; }
+  }
+  if (state === "levels") {   // world map: a press may become a drag (scroll) or, on release, a tap
+    map.anim = null; map.vel = 0;
+    map.drag = { id: e.pointerId, x0: p.x, y0: p.y, ly: p.y, lt: performance.now(), v: 0, moved: false };
+    return;
+  }
+  if (state !== "play" || !S) return;
+  if (e.pointerType === "touch") {
+    const which = p.x < W / 2 ? "move" : "aim";
+    if (!stick[which]) stick[which] = { id: e.pointerId, ox: p.x, oy: p.y, x: p.x, y: p.y };
+  } else if (e.button === 0) ptr.down = true;
+});
+cv.addEventListener("pointermove", e => {
+  const p = toCanvas(e);
+  const d = map.drag;
+  if (d && d.id === e.pointerId && state === "levels") {
+    const now = performance.now();
+    if (!d.moved && Math.hypot(p.x - d.x0, p.y - d.y0) > 8) { d.moved = true; map.scroll -= p.y - d.y0; }
+    else if (d.moved) map.scroll -= p.y - d.ly;
+    if (d.moved) { const s = Math.max(1, now - d.lt) / 1000; d.v = 0.6 * (-(p.y - d.ly) / s) + 0.4 * d.v; mapClamp(); }
+    d.ly = p.y; d.lt = now;
+  }
+  if (e.pointerType !== "touch") { ptr.x = p.x; ptr.y = p.y; ptr.seen = true; }
+  for (const k of ["move", "aim"]) {
+    const s = stick[k];
+    if (s && s.id === e.pointerId) { s.x = p.x; s.y = p.y; }
+  }
+});
+function release(e) {
+  const d = map.drag;
+  if (d && d.id === e.pointerId) {
+    map.drag = null;
+    if (e.type === "pointerup" && state === "levels") {
+      if (d.moved) map.vel = performance.now() - d.lt < 120 ? clamp(d.v, -3000, 3000) : 0;
+      else mapTap(toCanvas(e));
+    }
+  }
+  if (e.pointerType !== "touch") ptr.down = false;
+  for (const k of ["move", "aim"]) if (stick[k] && stick[k].id === e.pointerId) stick[k] = null;
+}
+cv.addEventListener("pointerup", release);
+cv.addEventListener("pointercancel", release);
+cv.addEventListener("wheel", e => {
+  e.preventDefault();
+  if (state === "levels" && e.deltaY) mapScrollBy(Math.sign(e.deltaY) * 80);
+}, { passive: false });
+
+function readInput() {
+  let mx = (keys.has("d") || keys.has("arrowright") ? 1 : 0) - (keys.has("a") || keys.has("arrowleft") ? 1 : 0);
+  let my = (keys.has("s") || keys.has("arrowdown") ? 1 : 0) - (keys.has("w") || keys.has("arrowup") ? 1 : 0);
+  let aim = null, fire = false;
+  if (stick.move) {
+    const dx = stick.move.x - stick.move.ox, dy = stick.move.y - stick.move.oy, l = Math.hypot(dx, dy);
+    if (l > 8) { mx = dx / 60; my = dy / 60; const m = Math.hypot(mx, my); if (m > 1) { mx /= m; my /= m; } }
+  }
+  if (stick.aim) {
+    const dx = stick.aim.x - stick.aim.ox, dy = stick.aim.y - stick.aim.oy;
+    if (Math.hypot(dx, dy) > 16) { aim = { x: dx, y: dy }; fire = true; }
+  } else if (!touchMode && ptr.seen) {
+    aim = { x: ptr.x - S.p.x, y: ptr.y - S.p.y };
+    fire = ptr.down;
+    if (Math.hypot(aim.x, aim.y) < 4) aim = null;
+  }
+  if (keys.has("k")) { fire = true; if (!ptr.down && !stick.aim) aim = null; }
+  return { move: { x: mx, y: my }, aim, fire: fire && S.time > 0.3 };
+}
+
+/* ---------- pre-rendered ground, one per act ---------- */
+const grounds = [];
+let groundAct = 0, ground = null;
+function buildGround(act) {
+  const cvs = document.createElement("canvas"); cvs.width = W; cvs.height = H;
+  const g = cvs.getContext("2d"), r = mulberry(7), rr = (a, b) => a + r() * (b - a), pal = ACT_PAL[act];
+  g.fillStyle = rgb(pal.bg); g.fillRect(0, 0, W, H);
+  g.fillStyle = rgb(pal.blob);
+  for (let i = 0; i < 260; i++) { g.beginPath(); g.arc(r() * W, r() * H, rr(8, 34), 0, TAU); g.fill(); }
+  g.lineWidth = 2;
+  for (let i = 0; i < 420; i++) {
+    const x = r() * W, y = r() * H, u = r();
+    g.strokeStyle = rgb([0, 1, 2].map(c => Math.floor(lerp(pal.g0[c], pal.g1[c], u))));
+    for (const k of [-3, 0, 3]) { g.beginPath(); g.moveTo(x + k, y); g.lineTo(x + k * 2, y - rr(5, 10)); g.stroke(); }
+  }
+  for (let i = 0; i < 40; i++) {
+    const x = r() * W, y = r() * H, w = rr(8, 18), h = rr(6, 12);
+    g.fillStyle = "#3e3e3a"; g.beginPath(); g.ellipse(x, y, w / 2, h / 2, 0, 0, TAU); g.fill();
+    g.fillStyle = "#5a5a52"; g.beginPath(); g.ellipse(x, y - 1, Math.max(1, w / 2 - 2), Math.max(1, h / 2 - 2), 0, 0, TAU); g.fill();
+  }
+  for (let i = 0; i < 14; i++) {
+    const x = r() * W, y = r() * H;
+    g.fillStyle = "#281e16"; g.beginPath(); g.arc(x, y, rr(10, 16), 0, TAU); g.fill();
+    g.fillStyle = "#3a2c1e"; g.beginPath(); g.arc(x, y, rr(4, 8), 0, TAU); g.fill();
+  }
+  if (act >= 3) {   // ash drifting over the last act
+    g.fillStyle = "rgb(150,150,158)";
+    for (let i = 0; i < 90; i++) { g.beginPath(); g.arc(r() * W, r() * H, rr(1, 2.5), 0, TAU); g.fill(); }
+  }
+  return cvs;
+}
+function setGround(act) {
+  groundAct = clamp(act, 0, 3);
+  if (!grounds[groundAct]) grounds[groundAct] = buildGround(groundAct);
+  ground = grounds[groundAct];
+}
+setGround(highestAct());
+
+/* ---------- drawing helpers ---------- */
+function text(txt, x, y, o = {}) {
+  let size = o.size || 24;
+  const font = s => `${o.display ? 900 : 700} ${s}px ${o.display ? FONT_D : FONT_B}`;
+  ctx.font = font(size);
+  if (o.maxW) { const w = ctx.measureText(txt).width; if (w > o.maxW) { size = Math.floor(size * o.maxW / w); ctx.font = font(size); } }
+  ctx.textAlign = o.align || "center"; ctx.textBaseline = o.base || "middle";
+  ctx.globalAlpha = o.alpha == null ? 1 : o.alpha;
+  ctx.fillStyle = BLACK; ctx.fillText(txt, x + 2, y + 2);
+  ctx.fillStyle = o.color || WHITE; ctx.fillText(txt, x, y);
+  ctx.globalAlpha = 1;
+}
+function rrect(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x, y, w, h, r) : ctx.rect(x, y, w, h); }
+function register(x, y, w, h, action, enabled = true) {
+  if (!enabled) return false;
+  hot.push({ x, y, w, h, action });
+  return !touchMode && ptr.seen && ptr.x >= x && ptr.x <= x + w && ptr.y >= y && ptr.y <= y + h;
+}
+// selected: a disabled button that marks the current choice (e.g. the level page being shown)
+function button(cx, cy, label, action, w = 320, h = 50, enabled = true, selected = false) {
+  const x = cx - w / 2, y = cy - h / 2, hover = register(x, y, w, h, action, enabled);
+  rrect(x, y, w, h, 10); ctx.fillStyle = hover ? BTN_HOT : selected ? "#5a3412" : (enabled ? BTN : BTN_OFF); ctx.fill();
+  ctx.lineWidth = selected ? 4 : 3; ctx.strokeStyle = hover || selected ? EMBER_HOT : CREAM; ctx.stroke();
+  text(label, cx, cy, { size: 24, color: WHITE, maxW: w - 20 });
+}
+function panel(x, y, w, h) {
+  rrect(x, y, w, h, 14); ctx.fillStyle = "rgba(16,10,10,0.94)"; ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = "#ffc878"; ctx.stroke();
+}
+function carve(x, y, r) {
+  const g = dctx.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, "rgba(0,0,0,1)"); g.addColorStop(0.25, "rgba(0,0,0,.82)"); g.addColorStop(0.5, "rgba(0,0,0,.62)");
+  g.addColorStop(0.75, "rgba(0,0,0,.37)"); g.addColorStop(1, "rgba(0,0,0,0)");
+  dctx.fillStyle = g; dctx.beginPath(); dctx.arc(x, y, r, 0, TAU); dctx.fill();
+}
+function warm(x, y, r, a) {
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, `rgba(255,150,50,${a})`); g.addColorStop(1, "rgba(255,150,50,0)");
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+}
+function glow(x, y, r, color, edge = "rgba(255,150,40,0)") {
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, color); g.addColorStop(1, edge);
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+}
+function circle(x, y, r, color) { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); }
+function ring(x, y, r, color, lw, a0 = 0, a1 = TAU) { ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.beginPath(); ctx.arc(x, y, Math.max(0, r), a0, a1); ctx.stroke(); }
+function tri(pts, c) { ctx.fillStyle = c; ctx.beginPath(); ctx.moveTo(pts[0], pts[1]); ctx.lineTo(pts[2], pts[3]); ctx.lineTo(pts[4], pts[5]); ctx.closePath(); ctx.fill(); }
+function line(x0, y0, x1, y1, color, lw) { ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke(); }
+function darkBegin(alpha) {
+  dctx.globalCompositeOperation = "source-over"; dctx.clearRect(0, 0, W, H);
+  dctx.fillStyle = `rgba(6,4,12,${alpha})`; dctx.fillRect(0, 0, W, H);
+  dctx.globalCompositeOperation = "destination-out";
+}
+function darkEnd() { dctx.globalCompositeOperation = "source-over"; ctx.drawImage(darkCv, 0, 0); }
+
+function drawBackdrop() {
+  ctx.drawImage(ground, 0, 0);
+  const x = ptr.seen ? ptr.x : W / 2, y = ptr.seen ? ptr.y : H / 2 + 40, r = 190 + Math.sin(T * 9) * 5;
+  warm(x, y, r, 0.28);
+  darkBegin(0.91); carve(x, y, r); darkEnd();
+}
+
+/* ---------- monsters ---------- */
+/* The Hollow Emperor, same look as on the home screen: hunched body, round head with a crown
+   of stolen lights, wide pale staring eyes, flat mouth, long arms with clawed hands.
+   r = his hit radius (46); drawn above the darkness so he is seen in his own night. */
+function drawEmperorFigure(x, y, r, o = {}) {
+  const flash = o.flash > 0, body = flash ? "#e1e1e1" : "rgb(38,30,50)", arm = flash ? "#ececec" : "rgb(56,46,74)";
+  const rim = `rgba(200,214,255,${0.45 + 0.12 * Math.sin(T * 2)})`;
+  const breath = Math.sin(T * 1.6) * r * 0.04, raise = o.raise ? r * 0.7 : 0;
+  ctx.save(); ctx.translate(x, y + breath);
+  ctx.lineWidth = 2.5; ctx.strokeStyle = rim;
+  // hunched torso and robe
+  ctx.fillStyle = body; ctx.beginPath();
+  ctx.moveTo(-1.8 * r, 2.0 * r); ctx.quadraticCurveTo(-1.9 * r, 0.6 * r, -1.1 * r, 0.35 * r);
+  ctx.quadraticCurveTo(0, 0.1 * r, 1.1 * r, 0.35 * r); ctx.quadraticCurveTo(1.9 * r, 0.6 * r, 1.8 * r, 2.0 * r); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  ctx.strokeStyle = "rgba(70,30,62,.9)"; ctx.lineWidth = r * 0.12;
+  for (let k = -2; k <= 2; k++) { ctx.beginPath(); ctx.moveTo(k * r * 0.4, 0.7 * r); ctx.lineTo(k * r * 0.48 + Math.sin(T * 2 + k) * 3, 2.0 * r); ctx.stroke(); }
+  // arms and clawed hands (raised while he gathers himself to blink)
+  for (const sd of [-1, 1]) {
+    const sx = sd * 1.25 * r, sy = 0.5 * r, hx = sd * 1.15 * r, hy = 1.55 * r - raise;
+    ctx.fillStyle = arm; ctx.strokeStyle = rim; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(sx - sd * 0.3 * r, sy - 0.1 * r); ctx.quadraticCurveTo(sx + sd * 0.55 * r, sy + 0.5 * r, hx + sd * 0.3 * r, hy - 0.1 * r);
+    ctx.lineTo(hx - sd * 0.2 * r, hy + 0.1 * r); ctx.quadraticCurveTo(sx + sd * 0.1 * r, sy + 0.7 * r, sx - sd * 0.5 * r, sy + 0.35 * r); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(hx, hy, 0.38 * r, 0.33 * r, 0, 0, TAU); ctx.fill(); ctx.stroke();
+    for (let k = 0; k < 4; k++) {
+      const fx = hx + (k - 1.5) * 0.18 * r, fy = hy + 0.25 * r;
+      ctx.strokeStyle = arm; ctx.lineWidth = r * 0.11; ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(fx, fy); ctx.lineTo(fx - sd * 0.05 * r, fy + 0.3 * r); ctx.stroke(); ctx.lineCap = "butt";
+      ctx.fillStyle = "#e0d8c8"; ctx.beginPath(); ctx.moveTo(fx - sd * 0.05 * r - 3, fy + 0.3 * r); ctx.lineTo(fx - sd * 0.08 * r, fy + 0.5 * r); ctx.lineTo(fx - sd * 0.05 * r + 3, fy + 0.3 * r); ctx.closePath(); ctx.fill();
+    }
+    glow(hx + sd * 0.05 * r, hy - 0.08 * r, 0.3 * r, "rgba(255,210,120,.55)");
+    circle(hx + sd * 0.05 * r, hy - 0.08 * r, Math.max(2, 0.08 * r), EMBER_HOT);
+  }
+  // head
+  ctx.fillStyle = body; ctx.strokeStyle = rim; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.ellipse(0, -0.3 * r, 0.95 * r, r, 0, 0, TAU); ctx.fill(); ctx.stroke();
+  // crown of stolen lights
+  const cy = -1.18 * r;
+  ctx.fillStyle = "rgb(138,106,42)"; ctx.fillRect(-0.82 * r, cy - 0.06 * r, 1.64 * r, 0.16 * r);
+  for (let k = -3; k <= 3; k++) {
+    const cx = k * 0.24 * r, h = (k === 0 ? 0.62 : 0.46 - Math.abs(k) * 0.05) * r;
+    tri([cx - 0.1 * r, cy - 0.04 * r, cx, cy - h, cx + 0.1 * r, cy - 0.04 * r], "rgb(168,134,58)");
+    glow(cx, cy + 0.02 * r, 0.3 * r, "rgba(255,210,120,.55)");
+    circle(cx, cy + 0.02 * r, Math.max(1.6, 0.07 * r), EMBER_HOT);
+  }
+  // wide pale staring eyes, pupils follow the target; a flat mouth
+  const lk = o.look || { x: 0, y: 0 }, blink = (T % 6.5) > 6.35;
+  for (const ex of [-0.38, 0.38]) {
+    const ecx = ex * r, ecy = -0.38 * r;
+    glow(ecx, ecy, 0.5 * r, "rgba(200,225,255,.35)");
+    ctx.fillStyle = flash ? WHITE : "#e8f0ff"; ctx.beginPath(); ctx.ellipse(ecx, ecy, 0.24 * r, blink ? 0.03 * r : 0.22 * r, 0, 0, TAU); ctx.fill();
+    if (!blink) circle(ecx + lk.x * 0.08 * r, ecy + lk.y * 0.08 * r + 0.04 * r, 0.08 * r, "#0c1020");
+  }
+  if (o.talking && Math.sin(T * 18) > 0) { ctx.fillStyle = "#0c0814"; ctx.beginPath(); ctx.ellipse(0, 0.28 * r, 0.22 * r, 0.06 * r, 0, 0, TAU); ctx.fill(); }
+  else line(-0.32 * r, 0.3 * r, 0.32 * r, 0.28 * r, "#0c0814", Math.max(2, 0.06 * r));
+  ctx.restore();
+}
+function drawBody(m) {
+  if (m.kind === "boss" && m.btype === "emperor") return;   // drawn above the darkness instead
+  const { x, y } = m.pos, r = m.r, bob = Math.sin(T * 6 + m.ph) * r * 0.1;
+  const col = m.flash > 0 ? "#e1e1e1" : m.col;
+  ctx.fillStyle = col;
+  ctx.beginPath(); ctx.ellipse(x, y + bob, r, r * 0.9, 0, 0, TAU); ctx.fill();
+  for (let k = -2; k <= 2; k++) {
+    ctx.beginPath(); ctx.arc(x + k * r * 0.4, y + r * 0.8 + Math.sin(T * 8 + k + m.ph) * 3, Math.max(3, r * 0.3), 0, TAU); ctx.fill();
+  }
+  if (m.kind === "runner") for (const s of [-1, 1]) tri([x + s * r * 0.6, y - r * 0.4, x + s * r * 1.6, y - r * 0.9, x + s * r * 0.9, y + r * 0.1], col);
+  else if (m.kind === "brute") for (const s of [-1, 1]) tri([x + s * r * 0.4, y - r * 0.7, x + s * r * 0.9, y - r * 1.5, x + s * r * 0.8, y - r * 0.5], "#463c32");
+  else if (m.kind === "wisp") {
+    const wc = m.flash > 0 ? "rgba(225,225,225,.55)" : `rgba(${m.colA[0]},${m.colA[1]},${m.colA[2]},.55)`;
+    for (const s of [-1, 1]) tri([x + s * r * 0.2, y + r * 0.2, x + s * r * 1.9, y - r * 0.4, x + s * r * 1.2, y + r * 0.9], wc);
+  } else if (m.kind === "hollow") {
+    ring(x, y + bob, r * 0.7, "rgb(70,70,90)", 3, 0.2, Math.PI - 0.2);
+    for (const s of [-1, 1]) line(x + s * r * 0.5, y + r * 0.2, x + s * r * 0.5, y + r * 1.1 + bob, "rgb(70,70,90)", 3);
+  } else if (m.kind === "boss") {
+    if (m.btype === "king") {
+      for (let k = -2; k <= 2; k++) { const bx = x + k * r * 0.32; tri([bx - 7, y - r * 0.75 + bob, bx, y - r * 1.25 + bob, bx + 7, y - r * 0.75 + bob], "rgb(200,160,60)"); }
+    } else if (m.btype === "mother") {   // a pale veil falling from a hood
+      tri([x - r * 1.1, y - r * 0.2 + bob, x, y - r * 1.5 + bob, x + r * 1.1, y - r * 0.2 + bob], "rgb(120,100,150)");
+      for (const s of [-1, 1]) tri([x + s * r * 0.9, y, x + s * r * 1.5, y + r * 1.5, x + s * r * 0.3, y + r * 1.1], "rgba(140,115,179,.7)");
+    } else if (m.btype === "warden") {   // a cracked bell
+      const wob = m.state === "wind" ? Math.sin(T * 30) * 4 : 0;
+      circle(x + wob, y - r * 1.05 + bob, 7, "rgb(160,150,120)");
+      ring(x + wob, y + bob, r * 0.95, "rgb(190,180,140)", 5, Math.PI + 0.4, TAU - 0.4);
+      circle(x, y + r * 1.15 + bob, 8, "rgb(190,180,140)");
+    } else if (m.btype === "emperor") {   // a long robe and a crown set with stolen lights
+      ctx.lineCap = "round";
+      for (let k = -2; k <= 2; k++) line(x + k * r * 0.35, y + r * 0.6, x + k * r * 0.55 + Math.sin(T * 2 + k) * 5, y + r * 1.9, "rgba(64,20,51,.95)", 7);
+      ctx.lineCap = "butt";
+      const cy = y - r * 0.8 + bob;
+      ctx.fillStyle = "rgb(150,120,50)"; ctx.fillRect(x - r * 0.75, cy - 6, r * 1.5, 12);
+      for (let k = -3; k <= 3; k++) {
+        const bx = x + k * r * 0.24;
+        tri([bx - 6, cy - 4, bx, cy - 26 - (k === 0 ? 8 : 0), bx + 6, cy - 4], "rgb(170,140,60)");
+        circle(bx, cy, 3, "rgb(255,210,120)");
+      }
+    }
+  }
+}
+function eyeColor(m) {
+  if (m.kind === "wisp") return "rgb(150,200,255)";
+  if (m.kind === "hollow") return "rgb(255,190,90)";
+  if (m.btype === "emperor") return "rgb(200,225,255)";
+  if (m.btype === "warden") return "rgb(255,215,120)";
+  return "#ff3c50";
+}
+function drawEyes(m) {
+  const { x, y } = m.pos, r = m.r, look = norm(S.p.x - x, S.p.y - y), lk = Math.max(2, r * 0.08);
+  const er = Math.max(3, Math.floor(r * 0.2)), ec = eyeColor(m);
+  for (const ex of [-0.38, 0.38]) {
+    const cx = x + ex * r + look.x * lk, cy = y - r * 0.3 + look.y * lk;
+    circle(cx, cy, er, m.flash > 0 ? WHITE : ec);
+    circle(cx, cy, Math.max(1, er / 2), WHITE);
+  }
+  if (m.kind !== "boss" && m.hp < m.maxhp) {
+    const bw = r * 2, bx = x - r, by = y - r - 14;
+    ctx.fillStyle = BLACK; ctx.fillRect(bx - 1, by - 1, bw + 2, 7);
+    ctx.fillStyle = DANGER; ctx.fillRect(bx, by, bw * Math.max(0, m.hp) / m.maxhp, 5);
+  }
+}
+
+/* ---------- play scene ---------- */
+function drawPlay(s) {
+  ctx.save();
+  if (state === "play" && s.shake > 0) ctx.translate(rand(-s.shake, s.shake), rand(-s.shake, s.shake));
+  ctx.drawImage(ground, 0, 0);
+  const lit = s.result !== "lose", rad = s.radius;
+  if (lit) warm(s.p.x, s.p.y, rad, 0.28);
+  for (const m of s.mons) drawBody(m);
+  if (lit) {
+    ctx.fillStyle = (s.hurtT > 0 && Math.floor(T * 20) % 2 === 0) ? DANGER : CREAM;
+    ctx.beginPath(); ctx.arc(s.p.x, s.p.y, PLAYER_R, 0, TAU); ctx.fill();
+    ctx.fillStyle = "#3c281e";
+    ctx.beginPath(); ctx.arc(s.p.x - 4, s.p.y - 2, 2, 0, TAU); ctx.arc(s.p.x + 4, s.p.y - 2, 2, 0, TAU); ctx.fill();
+  }
+  darkBegin(0.93 + 0.008 * actOf(s.idx));
+  if (lit) carve(s.p.x, s.p.y, rad);
+  s.pickups.slice(0, 12).forEach(pk => carve(pk.x, pk.y, 46));
+  for (const b of s.bolts) carve(b.x, b.y, 60);
+  darkEnd();
+
+  // self-lit things above the darkness
+  for (const pk of s.pickups) {
+    if (pk.life < 3 && Math.floor(T * 10) % 2 === 0) continue;
+    const x = pk.x, y = pk.y + Math.sin(T * 4 + pk.ph) * 4;
+    glow(x, y, 26, "rgba(255,150,40,.5)");
+    ctx.fillStyle = EMBER; ctx.beginPath(); ctx.arc(x, y + 3, 7, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(x - 6, y + 1); ctx.lineTo(x, y - 11); ctx.lineTo(x + 6, y + 1); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = EMBER_HOT; ctx.beginPath(); ctx.arc(x - 2, y + 2, 3, 0, TAU); ctx.fill();
+  }
+  for (const rg of s.rings) {   // bell shockwaves
+    const a = clamp(1 - rg.r / 1100, 0.25, 1);
+    ring(rg.x, rg.y, rg.r, `rgba(255,220,120,${0.28 * a})`, 30);
+    ring(rg.x, rg.y, rg.r, `rgba(255,242,191,${a})`, 5);
+  }
+  if (s.marker) {   // where the emperor is about to blink to
+    const pulse = 20 + Math.sin(T * 18) * 5;
+    ring(s.marker.x, s.marker.y, 38 + pulse, "rgba(204,224,255,.8)", 3);
+    ring(s.marker.x, s.marker.y, 20, "rgba(204,224,255,.5)", 2);
+  }
+  for (const m of s.mons) {
+    if (m.kind === "boss" && m.state === "wind") {
+      if (m.btype === "warden") ring(m.pos.x, m.pos.y, m.r + 14 + Math.sin(T * 40) * 6, "rgba(255,220,120,.8)", 4);
+      else line(m.pos.x, m.pos.y, m.pos.x + m.dir.x * 900, m.pos.y + m.dir.y * 900, DANGER, 3 + Math.floor(T * 20) % 3);
+    }
+    if (m.btype === "emperor") {
+      drawEmperorFigure(m.pos.x, m.pos.y, m.r, { flash: m.flash, raise: m.state !== "walk", look: norm(S.p.x - m.pos.x, S.p.y - m.pos.y) });
+      continue;
+    }
+    drawEyes(m);
+  }
+  for (const o of s.orbs) {   // stolen lights
+    glow(o.x, o.y, 24, "rgba(255,220,120,.6)", "rgba(255,220,120,0)");
+    circle(o.x, o.y, o.r, "rgb(184,214,255)");
+    circle(o.x, o.y, o.r * 0.5, WHITE);
+  }
+  for (const b of s.bolts) {
+    glow(b.x, b.y, 18, "rgba(255,220,120,.6)");
+    ctx.fillStyle = EMBER_HOT; ctx.beginPath(); ctx.arc(b.x, b.y, 5, 0, TAU); ctx.fill();
+    ctx.fillStyle = WHITE; ctx.beginPath(); ctx.arc(b.x, b.y, 2, 0, TAU); ctx.fill();
+  }
+  if (lit) {  // the oil lamp itself
+    const lx = s.p.x + s.aim.x * 18, ly = s.p.y + s.aim.y * 18;
+    ctx.strokeStyle = "#966e46"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(lx, ly - 13, 7, Math.PI, 0); ctx.stroke();
+    rrect(lx - 8, ly - 10, 16, 18, 4); ctx.fillStyle = "#6e4628"; ctx.fill();
+    const fl = 5 + Math.sin(T * 14) * 1.5 + 4 * Math.max(0, s.oil) / s.st.maxOil;
+    ctx.fillStyle = EMBER; ctx.beginPath(); ctx.arc(lx, ly - 1, fl, 0, TAU); ctx.fill();
+    ctx.fillStyle = EMBER_HOT; ctx.beginPath(); ctx.arc(lx, ly - 1, Math.max(2, fl - 3), 0, TAU); ctx.fill();
+    ctx.fillStyle = "#5a3c28"; ctx.fillRect(lx - 10, ly + 7, 20, 5);
+  }
+  for (const p of s.parts) {
+    const a = clamp(p.life / p.max, 0, 1), sz = Math.max(1, p.size * a);
+    ctx.fillStyle = p.color; ctx.fillRect(p.x, p.y, sz, sz);
+  }
+  for (const f of s.floaters) text(f.text, f.x, f.y, { size: 20, color: f.color });
+  ctx.restore();
+}
+
+function drawHud(s) {
+  const st = s.st;
+  text(`LEVEL ${s.idx + 1}: ${s.cfg.name}`, 18, 24, { size: 24, align: "left" });
+  if (!s.cfg.boss) text(`SLAIN ${s.kills} / ${s.goal}`, 18, 56, { size: 24, align: "left", color: CREAM });
+  text(`SHARDS ${s.shards}`, 18, s.cfg.boss ? 56 : 88, { size: 24, align: "left", color: EMBER_HOT });
+  const bx = W - 290, by = 14, bw = 262, bh = 24, frac = Math.max(0, s.oil) / st.maxOil;
+  ctx.fillStyle = BLACK; ctx.fillRect(bx - 3, by - 3, bw + 6, bh + 6);
+  ctx.fillStyle = frac > 0.3 ? EMBER : DANGER; ctx.fillRect(bx, by, bw * frac, bh);
+  ctx.strokeStyle = WHITE; ctx.lineWidth = 2; ctx.strokeRect(bx - 3, by - 3, bw + 6, bh + 6);
+  text("OIL", bx - 12, by + 12, { size: 24, align: "right" });
+  text(`${Math.floor(Math.max(0, s.oil))} / ${st.maxOil}`, W - 26, 58, { size: 20, align: "right" });
+  text(s.dashCd <= 0 ? "DASH READY" : `DASH ${s.dashCd.toFixed(1)}s`, W - 26, 86, { size: 20, align: "right", color: s.dashCd <= 0 ? GOOD : EMBER });
+  if (frac < 0.25 && !s.result && Math.floor(T * 3) % 2 === 0) text("LOW OIL - GRAB OIL DROPS!", W / 2, 130, { size: 24, color: DANGER });
+  if (s.boss && s.mons.includes(s.boss)) {
+    const b = s.boss, bw2 = 520, bx2 = (W - bw2) / 2, by2 = H - 40;
+    text(s.cfg.name.toUpperCase(), W / 2, by2 - 18, { size: 24, color: DANGER });
+    ctx.fillStyle = BLACK; ctx.fillRect(bx2 - 3, by2 - 3, bw2 + 6, 24);
+    ctx.fillStyle = "#c8283c"; ctx.fillRect(bx2, by2, bw2 * Math.max(0, b.hp) / b.maxhp, 18);
+    ctx.strokeStyle = WHITE; ctx.lineWidth = 2; ctx.strokeRect(bx2 - 3, by2 - 3, bw2 + 6, 24);
+  }
+  if (s.time < 3) {
+    const a = clamp((3 - s.time) / 0.8, 0, 1);
+    text(`LEVEL ${s.idx + 1}`, W / 2, H / 2 - 150, { size: 60, display: true, color: EMBER_HOT, alpha: a });
+    text(s.cfg.name, W / 2, H / 2 - 95, { size: 32, alpha: a });
+    text(goalText(s.cfg), W / 2, H / 2 - 58, { size: 24, color: CREAM, alpha: a });
+  }
+  if (s.time < 7 && state === "play") {
+    text(touchMode ? "LEFT THUMB: move   |   RIGHT THUMB: aim + fire   |   DASH button"
+                   : "MOUSE: aim + hold click to shoot   |   WASD: move   |   SPACE: dash", W / 2, touchMode ? H - 215 : H - 100, { size: 20 });
+  }
+  // pause button (all devices)
+  const hv = register(W / 2 - 22, 8, 44, 40, () => { state = "pause"; sfx("click"); });
+  rrect(W / 2 - 22, 8, 44, 40, 8); ctx.fillStyle = hv ? BTN_HOT : "rgba(16,10,10,.85)"; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = CREAM; ctx.stroke();
+  ctx.fillStyle = WHITE; ctx.fillRect(W / 2 - 9, 18, 6, 20); ctx.fillRect(W / 2 + 3, 18, 6, 20);
+
+  if (state === "play") {
+    if (touchMode) drawTouch(s);
+    else if (ptr.seen) {
+      ctx.strokeStyle = EMBER_HOT; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(ptr.x, ptr.y, 11, 0, TAU); ctx.stroke();
+      ctx.fillStyle = WHITE; ctx.beginPath(); ctx.arc(ptr.x, ptr.y, 2, 0, TAU); ctx.fill();
+    }
+  }
+}
+function drawTouch(s) {
+  const stickRing = (st, hx, hy, label) => {
+    const ox = st ? st.ox : hx, oy = st ? st.oy : hy;
+    ctx.lineWidth = 3; ctx.strokeStyle = st ? "rgba(255,240,200,.95)" : "rgba(255,240,200,.7)";
+    ctx.beginPath(); ctx.arc(ox, oy, 62, 0, TAU); ctx.stroke();
+    if (st) {
+      let dx = st.x - st.ox, dy = st.y - st.oy; const l = Math.hypot(dx, dy);
+      if (l > 62) { dx = dx / l * 62; dy = dy / l * 62; }
+      ctx.fillStyle = "rgba(255,150,42,.85)"; ctx.beginPath(); ctx.arc(ox + dx, oy + dy, 28, 0, TAU); ctx.fill();
+    } else text(label, hx, hy, { size: 20 });
+  };
+  stickRing(stick.move, 140, H - 120, "MOVE");
+  stickRing(stick.aim, W - 170, H - 120, "AIM + FIRE");
+  const dx = W - 70, dy = H - 270, ready = s.dashCd <= 0;
+  register(dx - 46, dy - 46, 92, 92, () => { dashReq = true; });
+  ctx.fillStyle = ready ? "rgba(130,75,20,.95)" : "rgba(34,26,24,.9)"; ctx.beginPath(); ctx.arc(dx, dy, 46, 0, TAU); ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = ready ? EMBER_HOT : CREAM; ctx.stroke();
+  text("DASH", dx, dy, { size: 22, color: WHITE });
+}
+
+/* ---------- screens ---------- */
+/* Home screen: the lantern spirit on the left, and something huge in the dark behind it. */
+/* Home screen: only the Hollow Emperor's hands, huge, reaching out of the dark. */
+function drawHand(ox, oy, ang, sc, phase) {
+  const reach = Math.sin(T * 0.8 + phase) * 14;
+  ctx.save(); ctx.translate(ox, oy); ctx.rotate(ang); ctx.scale(sc, sc); ctx.translate(reach, 0);
+  const body = "rgb(38,30,50)", rim = `rgba(200,214,255,${0.35 + 0.1 * Math.sin(T * 2 + phase)})`;
+  // forearm coming from off-screen, in a ragged sleeve
+  ctx.fillStyle = body;
+  ctx.beginPath(); ctx.moveTo(-400, -55); ctx.quadraticCurveTo(-150, -70, 0, -45); ctx.lineTo(0, 45); ctx.quadraticCurveTo(-150, 70, -400, 60); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "rgb(58,22,52)";
+  ctx.beginPath(); ctx.moveTo(-400, -75); ctx.lineTo(-170, -80); ctx.lineTo(-150, -40); ctx.lineTo(-185, 0); ctx.lineTo(-145, 50); ctx.lineTo(-175, 85); ctx.lineTo(-400, 80); ctx.closePath(); ctx.fill();
+  // palm
+  ctx.fillStyle = body; ctx.beginPath(); ctx.ellipse(25, 0, 55, 50, 0, 0, TAU); ctx.fill();
+  ctx.strokeStyle = rim; ctx.lineWidth = 2; ctx.stroke();
+  // long bony fingers that curl slowly, with claws
+  const curl = 0.25 + Math.sin(T * 1.1 + phase) * 0.12;
+  ctx.lineCap = "round";
+  [[-36, -0.5, 120], [-12, -0.17, 140], [12, 0.15, 135], [34, 0.48, 115], [-48, -1.25, 80]].forEach(([y, a, len], i) => {
+    let x = 60, yy = y, dir = a;
+    ctx.lineWidth = 16 - i * 0.5; ctx.strokeStyle = body;
+    ctx.beginPath(); ctx.moveTo(x, yy);
+    for (let seg = 0; seg < 3; seg++) { x += Math.cos(dir) * len / 3; yy += Math.sin(dir) * len / 3; ctx.lineTo(x, yy); dir += curl * 0.55; }
+    ctx.stroke();
+    ctx.strokeStyle = rim; ctx.lineWidth = 2; ctx.stroke();
+    // claw
+    ctx.fillStyle = "#d8d0c0";
+    ctx.beginPath(); ctx.moveTo(x - Math.sin(dir) * 6, yy + Math.cos(dir) * 6); ctx.lineTo(x + Math.cos(dir) * 26, yy + Math.sin(dir) * 26); ctx.lineTo(x + Math.sin(dir) * 6, yy - Math.cos(dir) * 6); ctx.closePath(); ctx.fill();
+  });
+  // pale rim along the arm, where the lamp light catches it
+  ctx.strokeStyle = rim; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(-400, 60); ctx.quadraticCurveTo(-150, 70, 0, 45); ctx.quadraticCurveTo(70, 45, 78, 0); ctx.stroke();
+  // a stolen light on one finger, a ring
+  glow(60, -22, 18, "rgba(255,210,120,.6)"); ctx.fillStyle = "#ffdc78"; ctx.beginPath(); ctx.arc(60, -22, 5, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+function drawEmperorBehind(cx) {
+  const breath = Math.sin(T * 1.3) * 3, body = "rgb(38,30,50)";
+  const rim = `rgba(200,214,255,${0.38 + 0.1 * Math.sin(T * 2)})`;
+  ctx.save(); ctx.translate(0, breath);
+  // hunched shoulders and torso
+  ctx.fillStyle = body;
+  ctx.beginPath(); ctx.moveTo(cx - 200, 660); ctx.quadraticCurveTo(cx - 210, 330, cx - 120, 290);
+  ctx.quadraticCurveTo(cx, 250, cx + 120, 290); ctx.quadraticCurveTo(cx + 210, 330, cx + 200, 660); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = rim; ctx.lineWidth = 3; ctx.stroke();
+  // head
+  ctx.beginPath(); ctx.ellipse(cx, 205, 92, 100, 0, 0, TAU); ctx.fillStyle = body; ctx.fill(); ctx.stroke();
+  // robe folds
+  ctx.strokeStyle = "rgba(70,30,62,0.9)"; ctx.lineWidth = 8;
+  for (let k = -2; k <= 2; k++) { ctx.beginPath(); ctx.moveTo(cx + k * 50, 360); ctx.quadraticCurveTo(cx + k * 56 + Math.sin(T + k) * 6, 500, cx + k * 62, 660); ctx.stroke(); }
+  // crown of stolen lights
+  const cy = 118;
+  ctx.fillStyle = "#8a6a2a"; ctx.fillRect(cx - 82, cy - 6, 164, 16);
+  for (let k = -3; k <= 3; k++) {
+    const x = cx + k * 24, h = k === 0 ? 62 : 46 - Math.abs(k) * 5;
+    ctx.fillStyle = "#a8863a"; ctx.beginPath(); ctx.moveTo(x - 10, cy - 4); ctx.lineTo(x, cy - h); ctx.lineTo(x + 10, cy - 4); ctx.closePath(); ctx.fill();
+    glow(x, cy + 2, 15, "rgba(255,210,120,.55)");
+    ctx.fillStyle = "#ffdc78"; ctx.beginPath(); ctx.arc(x, cy + 2, 4 + Math.sin(T * 3 + k) * 0.8, 0, TAU); ctx.fill();
+  }
+  // wide, pale, staring eyes and a flat mouth
+  const blink = (T % 6.5) > 6.35, look = clamp((ptr.x - cx) / 500, -1, 1) * 5;
+  for (const ex of [-36, 36]) {
+    const x = cx + ex, y = 196;
+    glow(x, y, 46, "rgba(200,225,255,.35)");
+    ctx.fillStyle = "#e8f0ff"; ctx.beginPath(); ctx.ellipse(x, y, 22, blink ? 2 : 20, 0, 0, TAU); ctx.fill();
+    if (!blink) { ctx.fillStyle = "#0c1020"; ctx.beginPath(); ctx.arc(x + look, y + 6, 7, 0, TAU); ctx.fill(); }
+  }
+  ctx.strokeStyle = "#0c0814"; ctx.lineWidth = 5; ctx.beginPath(); ctx.moveTo(cx - 30, 258); ctx.lineTo(cx + 30, 256); ctx.stroke();
+  ctx.restore();
+}
+function drawGraspingArm(cx, px, py, side) {
+  const arm = "rgb(56,46,74)", rim = `rgba(200,214,255,${0.45 + 0.1 * Math.sin(T * 2)})`;
+  const close = Math.sin(T * 0.9) * 6;                 // the hands slowly close in
+  const sx = cx + side * 150, sy = 320, hx = px + side * (78 - close), hy = py - 6;
+  // thick arm from the shoulder down to the wrist
+  ctx.fillStyle = arm; ctx.strokeStyle = rim; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(sx - side * 40, sy - 10);
+  ctx.quadraticCurveTo(sx + side * 70, sy + 120, hx + side * 34, hy - 30);
+  ctx.lineTo(hx + side * 4, hy + 10);
+  ctx.quadraticCurveTo(sx + side * 10, sy + 150, sx - side * 70, sy + 60);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  // hand
+  ctx.beginPath(); ctx.ellipse(hx, hy, 38, 34, 0, 0, TAU); ctx.fill(); ctx.stroke();
+  // long fingers curling around the spirit, with pale claws
+  ctx.lineCap = "round";
+  for (let k = 0; k < 4; k++) {
+    const y0 = hy - 20 + k * 14, x0 = hx - side * 28;
+    const x1 = x0 - side * (34 - k * 2), y1 = y0 + 10 + k * 4, x2 = x1 - side * 10, y2 = y1 + 22;
+    ctx.strokeStyle = arm; ctx.lineWidth = 13;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.quadraticCurveTo(x1, y0, x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    ctx.strokeStyle = rim; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = "#e0d8c8";
+    ctx.beginPath(); ctx.moveTo(x2 - 5, y2 - 2); ctx.lineTo(x2 + side * 2, y2 + 18); ctx.lineTo(x2 + 5, y2 - 2); ctx.closePath(); ctx.fill();
+  }
+  // a stolen light set in a ring
+  glow(hx + side * 6, hy - 6, 16, "rgba(255,210,120,.6)");
+  ctx.fillStyle = "#ffdc78"; ctx.beginPath(); ctx.arc(hx + side * 6, hy - 6, 4.5, 0, TAU); ctx.fill();
+}
+function drawLurker() {}
+function drawLurkerEyes() {}
+function drawMenuScene() {
+  ctx.drawImage(ground, 0, 0);
+  const cx = 770, px = cx, py = 560 + Math.sin(T * 2) * 2, r = 120 + Math.sin(T * 9) * 4;
+  warm(px, py, r, 0.3);
+  darkBegin(0.9); carve(px, py, r); darkEnd();
+  drawEmperorBehind(cx);
+  // his arms come down on either side and his hands close around the spirit
+  drawGraspingArm(cx, px, py, -1);
+  drawGraspingArm(cx, px, py, 1);
+  // the little lantern spirit in front, frightened
+  ctx.fillStyle = CREAM; ctx.beginPath(); ctx.arc(px, py, 18, 0, TAU); ctx.fill();
+  ctx.fillStyle = "#3c281e"; ctx.beginPath(); ctx.arc(px - 6, py - 3, 3, 0, TAU); ctx.arc(px + 6, py - 3, 3, 0, TAU); ctx.fill();
+  ctx.strokeStyle = "#3c281e"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(px, py + 9, 5, Math.PI + 0.3, -0.3); ctx.stroke();
+  const lx = px + 26, ly = py + 4;
+  ctx.strokeStyle = "#966e46"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(lx, ly - 13, 7, Math.PI, 0); ctx.stroke();
+  rrect(lx - 8, ly - 10, 16, 18, 4); ctx.fillStyle = "#6e4628"; ctx.fill();
+  const fl = 7 + Math.sin(T * 14) * 1.5;
+  glow(lx, ly - 1, 30, "rgba(255,150,40,.5)");
+  ctx.fillStyle = EMBER; ctx.beginPath(); ctx.arc(lx, ly - 1, fl, 0, TAU); ctx.fill();
+  ctx.fillStyle = EMBER_HOT; ctx.beginPath(); ctx.arc(lx, ly - 1, fl - 3, 0, TAU); ctx.fill();
+}
+function drawMenu() {
+  drawMenuScene();
+  const mx = 300;
+  text("HOLLOW FOREST", mx, 100 + Math.sin(T * 2) * 5, { size: 58, display: true, color: EMBER_HOT });
+  text(STORY.TAGLINE, mx, 160, { size: 22 });
+  button(mx, 250, save.cleared.length ? "CONTINUE" : "PLAY", playPressed);
+  button(mx, 315, "LAMP UPGRADES", () => go("shop"));
+  button(mx, 380, muted ? "SOUND: OFF" : "SOUND: ON", toggleMute);
+  const lines = touchMode
+    ? ["Left thumb moves.", "Right thumb aims and fires.", "DASH button: safe, and it hurts monsters."]
+    : ["WASD / Arrows: move", "Mouse: aim, hold click to shoot", "SPACE: dash     P: pause"];
+  lines.forEach((l, i) => text(l, mx, 470 + i * 30, { size: 20, color: CREAM }));
+  text(`SHARDS ${save.shards}`, W - 20, 28, { size: 24, align: "right", color: EMBER_HOT });
+}
+/* ---------- dialogue screen ---------- */
+const vt = size => `${size}px "VT323", "Courier New", monospace`;
+// Portraits are drawn in in-game units (boss radius 46) around (0,0), then scaled.
+const PORTRAIT_SPAN = { king: [-60, 52], mother: [-70, 70], warden: [-56, 62], emperor: [-82, 96], elin: [-56, 76] };
+function drawElin(talking) {
+  const hair = "rgb(34,24,28)";
+  // shawl over the shoulders
+  ctx.fillStyle = "rgb(120,90,140)";
+  ctx.beginPath(); ctx.moveTo(-26, 34); ctx.quadraticCurveTo(0, 44, 26, 34); ctx.lineTo(70, 76); ctx.lineTo(-70, 76); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = "rgb(92,66,110)"; ctx.lineWidth = 2;
+  for (const s of [-1, 1]) { ctx.beginPath(); ctx.moveTo(s * 18, 42); ctx.lineTo(s * 40, 76); ctx.stroke(); }
+  // hair behind the face, falling to the sides
+  ctx.fillStyle = hair;
+  ctx.beginPath(); ctx.ellipse(0, -6, 38, 44, 0, 0, TAU); ctx.fill();
+  for (const s of [-1, 1]) {
+    ctx.beginPath(); ctx.moveTo(s * 24, -20); ctx.quadraticCurveTo(s * 50, 20, s * 46, 62);
+    ctx.lineTo(s * 26, 54); ctx.quadraticCurveTo(s * 30, 20, s * 18, 6); ctx.closePath(); ctx.fill();
+  }
+  // neck and face
+  ctx.fillStyle = "rgb(200,184,170)"; ctx.fillRect(-8, 24, 16, 16);
+  ctx.fillStyle = "rgb(230,215,200)"; ctx.beginPath(); ctx.ellipse(0, 0, 26, 34, 0, 0, TAU); ctx.fill();
+  // fringe, parted in the middle
+  ctx.fillStyle = hair; ctx.beginPath();
+  ctx.moveTo(-28, 0); ctx.quadraticCurveTo(-30, -40, 0, -38); ctx.quadraticCurveTo(30, -40, 28, 0);
+  ctx.quadraticCurveTo(22, -24, 2, -26); ctx.lineTo(-2, -26); ctx.quadraticCurveTo(-22, -24, -28, 0); ctx.fill();
+  // tired eyes: heavy lids as small arcs, shadows beneath
+  for (const s of [-1, 1]) {
+    ring(s * 10, 6, 7, "rgba(170,140,140,.6)", 1.5, 0.25 * Math.PI, 0.75 * Math.PI);
+    ring(s * 10, 0, 6, "rgb(60,44,50)", 2.5, 0.15 * Math.PI, 0.85 * Math.PI);
+    if (talking && Math.sin(T * 7 + s) > 0.2) circle(s * 10, 5, 1.6, "rgb(60,44,50)");
+  }
+  // mouth: moves while she speaks
+  if (talking && Math.sin(T * 18) > 0) { ctx.fillStyle = "rgb(120,70,72)"; ctx.beginPath(); ctx.ellipse(0, 19, 4, 3, 0, 0, TAU); ctx.fill(); }
+  else line(-5, 19, 5, 20, "rgb(150,100,100)", 2);
+}
+function drawPortrait(who, x, y, s, talking) {
+  const span = PORTRAIT_SPAN[who] || [-60, 60];
+  ctx.save();
+  ctx.translate(x, y - (span[0] + span[1]) / 2 * s); ctx.scale(s, s);
+  if (who === "elin") drawElin(talking);
+  else {
+    const col = BOSS_COL[who];
+    const m = { pos: { x: 0, y: 0 }, r: 46, col: rgb(col), colA: col, kind: "boss", btype: who, ph: 0, flash: 0, state: "walk" };
+    if (who === "emperor") { drawEmperorFigure(0, 0, 46, { talking }); ctx.restore(); return; }
+    drawBody(m);
+    const ec = eyeColor(m), er = 9 * (talking ? 0.75 + 0.35 * Math.abs(Math.sin(T * 22)) : 1), by = Math.sin(T * 6) * 4.6;
+    for (const ex of [-0.38, 0.38]) {
+      circle(ex * 46, -46 * 0.3 + by, er, ec);
+      circle(ex * 46, -46 * 0.3 + by, Math.max(1, er / 2), WHITE);
+    }
+  }
+  ctx.restore();
+}
+// Word-wrap keeping character indices, so the typewriter can reveal the same characters.
+function layoutDialogue(pg, x0) {
+  const key = x0 + (document.fonts && document.fonts.check ? String(document.fonts.check(vt(30))) : "");
+  if (pg.layout && pg.layoutKey === key) return pg.layout;
+  const maxW = 872 - x0, src = pg.text.split("\n");
+  let out = null;
+  for (let size = 30; size >= 18 && !out; size -= 2) {
+    const lh = size * 36 / 30, rows = [];
+    let y = 0, idx = 0;
+    src.forEach((ln, li) => {
+      const head = pg.head && li === 0, fs = head ? size + 8 : size;
+      ctx.font = vt(fs);
+      if (ln === "") { y += lh * 0.5; idx += 1; return; }
+      let start = 0;
+      while (start < ln.length) {
+        let end = ln.length;
+        if (ctx.measureText(ln.slice(start)).width > maxW) {
+          let cut = -1;
+          for (let k = start + 1; k < ln.length; k++) if (ln[k] === " " && ctx.measureText(ln.slice(start, k)).width <= maxW) cut = k;
+          if (cut > start) end = cut;
+        }
+        rows.push({ a: idx + start, b: idx + end, y, fs, head });
+        y += head ? lh + 8 : lh;
+        start = end < ln.length ? end + 1 : end;
+      }
+      idx += ln.length + 1;
+    });
+    if (y <= 160 || size <= 18) out = { rows, size };
+  }
+  pg.layout = out; pg.layoutKey = key;
+  return out;
+}
+function drawStory() {
+  ctx.fillStyle = "rgb(5,3,8)"; ctx.fillRect(0, 0, W, H);
+  const pg = story.pg, gy = 230;
+  glow(W / 2, gy, 210 + Math.sin(T * 2.3) * 8, "rgba(255,150,40,.3)");
+  if (!pg || !pg.who) {   // the small ember, when no one is speaking
+    glow(W / 2, gy, 60, "rgba(255,170,60,.45)");
+    circle(W / 2, gy + 8, 7, EMBER);
+    tri([W / 2 - 6, gy + 6, W / 2, gy - 14 + Math.sin(T * 9) * 2, W / 2 + 6, gy + 6], EMBER_HOT);
+  }
+  if (pg) {
+    const talking = !storyComplete();
+    if (pg.who) drawPortrait(pg.who, W / 2, 215 + Math.sin(T * 1.6) * 6, 2.2, talking);
+    // name tab, then the box (its border overlaps the tab's bottom edge)
+    if (pg.who) {
+      const name = SPEAKERS[pg.who];
+      ctx.font = vt(28); const tw = ctx.measureText(name).width + 34;
+      ctx.fillStyle = BLACK; ctx.fillRect(60, 364, tw, 50);
+      ctx.strokeStyle = WHITE; ctx.lineWidth = 4; ctx.strokeRect(62, 366, tw - 4, 46);
+      ctx.fillStyle = WHITE; ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.fillText(name, 77, 388);
+    }
+    ctx.fillStyle = BLACK; ctx.fillRect(60, 410, 840, 200);
+    ctx.strokeStyle = WHITE; ctx.lineWidth = 6; ctx.strokeRect(63, 413, 834, 194);
+    let x0 = 90;
+    if (pg.who) {
+      x0 = 240;
+      ctx.save(); ctx.beginPath(); ctx.rect(80, 440, 140, 140); ctx.clip();
+      drawPortrait(pg.who, 150, 510, 0.82, talking);
+      ctx.restore();
+    }
+    const lay = layoutDialogue(pg, x0);
+    ctx.textAlign = "left"; ctx.textBaseline = "top";
+    for (const r of lay.rows) {
+      const take = clamp(story.shown - r.a, 0, r.b - r.a);
+      if (take <= 0) continue;
+      ctx.font = vt(r.fs); ctx.fillStyle = r.head ? EMBER_HOT : WHITE;
+      ctx.fillText(pg.text.slice(r.a, r.a + take), x0, 434 + r.y);
+    }
+    if (!talking && Math.floor(T * 2.5) % 2 === 0) tri([858, 584, 882, 584, 870, 598], WHITE);
+  }
+  // skip button first so it wins over the full-screen tap area
+  const hv = register(W - 130, 14, 116, 44, storySkip);
+  rrect(W - 130, 14, 116, 44, 8); ctx.fillStyle = hv ? BTN_HOT : "rgba(16,10,10,.85)"; ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = CREAM; ctx.stroke();
+  text("SKIP", W - 72, 36, { size: 22 });
+  register(0, 0, W, H, storyAdvance);
+}
+
+/* ---------- world map: a tall winding road, level 1 at the bottom, 20 at the top ---------- */
+const nodePos = i => ({ x: clamp(480 + 300 * Math.sin(i * 0.85), 90, 870), y: MAP_H - 170 - i * 120 });
+const NODES = LEVELS.map((_, i) => nodePos(i));
+const nodeR = i => LEVELS[i].boss ? 40 : 30;
+const ACT_FIRST = [0, 4, 8, 14];
+const ROAD = (() => {   // Catmull-Rom through consecutive nodes, 16 segments per pair
+  const pts = [{ x: NODES[0].x, y: NODES[0].y }];
+  for (let i = 0; i < NODES.length - 1; i++) {
+    const p0 = NODES[Math.max(0, i - 1)], p1 = NODES[i], p2 = NODES[i + 1], p3 = NODES[Math.min(NODES.length - 1, i + 2)];
+    for (let s = 1; s <= 16; s++) {
+      const t = s / 16, t2 = t * t, t3 = t2 * t;
+      const f = (a, b, c, d) => 0.5 * (2 * b + (c - a) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (3 * b - a - 3 * c + d) * t3);
+      pts.push({ x: f(p0.x, p1.x, p2.x, p3.x), y: f(p0.y, p1.y, p2.y, p3.y) });
+    }
+  }
+  return pts;
+})();
+// act borders sit halfway between an act's last node and the next act's first node
+const BOUNDS = [1, 2, 3].map(a => (NODES[ACT_FIRST[a] - 1].y + NODES[ACT_FIRST[a]].y) / 2);
+const actAtY = y => { let a = 0; for (let k = 0; k < 3; k++) if (y < BOUNDS[k]) a = k + 1; return a; };
+function bandCol(y) {
+  let c = ACT_PAL[0].bg.slice();
+  for (let a = 1; a <= 3; a++) {
+    const u = clamp((BOUNDS[a - 1] + 40 - y) / 80, 0, 1);
+    c = c.map((v, k) => Math.round(lerp(v, ACT_PAL[a].bg[k], u)));
+  }
+  return c;
+}
+const BANNER_W = 300, BANNER_H = 40;
+const BANNERS = ACT_FIRST.map((n, a) => {
+  const y = NODES[n].y + 60;
+  // beside the road at that height: the free spot nearest the road (ribbon tails included)
+  const free = x => ROAD.every(p => Math.abs(p.x - x) > BANNER_W / 2 + 32 || Math.abs(p.y - y) > BANNER_H / 2 + 22) &&
+    NODES.every((q, i) => Math.abs(q.x - x) > BANNER_W / 2 + 32 + nodeR(i) || Math.abs(q.y - y) > BANNER_H / 2 + nodeR(i) + (LEVELS[i].boss ? 12 : 6));
+  let best = NODES[n].x, bd = 1e9;
+  for (let x = 180; x <= 780; x += 5) {
+    if (!free(x)) continue;
+    const d = Math.abs(x - NODES[n].x);
+    if (d < bd) { bd = d; best = x; }
+  }
+  return { x: best, y, name: STORY.ACT_NAMES[a] };
+});
+let mapDecor = [];
+function drawDecor(g, it) {
+  const { x, y, sz, v } = it, pal = ACT_PAL[it.a];
+  const tone2 = (c, f) => `rgb(${Math.round(c[0] * f)},${Math.round(c[1] * f)},${Math.round(c[2] * f)})`;
+  if (it.k === "pine") {
+    const h = 66 * sz, w = 38 * sz;
+    g.fillStyle = "rgba(0,0,0,.3)"; g.beginPath(); g.ellipse(x, y + 2, w * 0.55, 6 * sz, 0, 0, TAU); g.fill();
+    g.fillStyle = "rgb(36,26,20)"; g.fillRect(x - 3 * sz, y - 10 * sz, 6 * sz, 12 * sz);
+    for (let k = 0; k < 3; k++) {
+      const by = y - 8 * sz - k * h * 0.24, ww = w * (1 - k * 0.22), th = h * 0.42;
+      g.fillStyle = tone2(pal.g0, 0.42 + 0.06 * v);
+      g.beginPath(); g.moveTo(x - ww / 2, by); g.lineTo(x, by - th); g.lineTo(x + ww / 2, by); g.closePath(); g.fill();
+      g.fillStyle = tone2(pal.g0, 0.55 + 0.06 * v);   // a faint moonlit side
+      g.beginPath(); g.moveTo(x, by - th); g.lineTo(x + ww / 2, by); g.lineTo(x + ww * 0.12, by); g.closePath(); g.fill();
+    }
+  } else if (it.k === "stone") {
+    const w = 18 * sz, h = 11 * sz;
+    g.fillStyle = "rgb(46,46,44)"; g.beginPath(); g.ellipse(x, y, w / 2, h / 2, 0, 0, TAU); g.fill();
+    g.fillStyle = "rgb(64,64,60)"; g.beginPath(); g.ellipse(x - 1, y - 1.5, w / 2 - 3, h / 2 - 3, 0, 0, TAU); g.fill();
+  } else if (it.k === "mush") {
+    const s = sz * 1.1;
+    g.fillStyle = "rgb(128,118,104)"; g.fillRect(x - 2.5 * s, y - 9 * s, 5 * s, 9 * s);
+    g.fillStyle = v < 0.5 ? "rgb(112,40,46)" : "rgb(84,52,104)";
+    g.beginPath(); g.arc(x, y - 8 * s, 9 * s, Math.PI, 0); g.closePath(); g.fill();
+    g.fillStyle = "rgba(230,215,190,.45)";
+    for (const dx of [-4, 1, 5]) { g.beginPath(); g.arc(x + dx * s, y - 11 * s + Math.abs(dx) * 0.4 * s, 1.3 * s, 0, TAU); g.fill(); }
+    if (v > 0.6) {   // a smaller one beside it
+      g.fillStyle = "rgb(128,118,104)"; g.fillRect(x + 9 * s, y - 5 * s, 3 * s, 5 * s);
+      g.fillStyle = v < 0.8 ? "rgb(112,40,46)" : "rgb(84,52,104)";
+      g.beginPath(); g.arc(x + 10.5 * s, y - 5 * s, 5 * s, Math.PI, 0); g.closePath(); g.fill();
+    }
+  } else if (it.k === "post") {   // an unlit lantern post
+    const h = 48 * sz;
+    g.strokeStyle = "rgb(44,36,30)"; g.lineWidth = 4;
+    g.beginPath(); g.moveTo(x, y); g.lineTo(x, y - h); g.lineTo(x + 12, y - h); g.stroke();
+    g.lineWidth = 2; g.beginPath(); g.moveTo(x + 12, y - h); g.lineTo(x + 12, y - h + 5); g.stroke();
+    g.fillStyle = "rgb(58,50,44)"; g.fillRect(x + 6, y - h + 5, 12, 15);
+    g.fillStyle = "rgb(22,22,28)"; g.fillRect(x + 8, y - h + 8, 8, 9);
+    g.fillStyle = "rgba(0,0,0,.3)"; g.beginPath(); g.ellipse(x, y + 1, 7, 3, 0, 0, TAU); g.fill();
+  }
+}
+function strokeRoad(g, pts, alpha) {
+  if (pts.length < 2) return;
+  g.save(); g.globalAlpha = alpha; g.lineJoin = "round"; g.lineCap = "round";
+  g.beginPath(); g.moveTo(pts[0].x, pts[0].y); for (const p of pts) g.lineTo(p.x, p.y);
+  g.strokeStyle = "rgba(0,0,0,.35)"; g.lineWidth = 26; g.stroke();
+  g.strokeStyle = "rgb(30,20,16)"; g.lineWidth = 14; g.stroke();
+  g.setLineDash([14, 12]); g.lineCap = "butt"; g.strokeStyle = "rgba(255,240,200,.35)"; g.lineWidth = 6; g.stroke();
+  g.restore();
+}
+function buildMapBg(upto) {
+  const c = document.createElement("canvas"); c.width = W; c.height = MAP_H;
+  const g = c.getContext("2d"), r = mulberry(11), rr = (a, b) => a + r() * (b - a);
+  for (let y = 0; y < MAP_H; y += 2) { g.fillStyle = rgb(bandCol(y)); g.fillRect(0, y, W, 2); }
+  for (let i = 0; i < 900; i++) {   // mottled ground
+    const x = r() * W, y = r() * MAP_H, rad = rr(10, 38);
+    g.fillStyle = rgb(ACT_PAL[actAtY(y)].blob); g.globalAlpha = 0.7;
+    g.beginPath(); g.arc(x, y, rad, 0, TAU); g.fill();
+  }
+  g.globalAlpha = 0.45; g.lineWidth = 2;
+  for (let i = 0; i < 1100; i++) {   // grass tufts
+    const x = r() * W, y = r() * MAP_H, u = r(), pal = ACT_PAL[actAtY(y)];
+    g.strokeStyle = rgb([0, 1, 2].map(k => Math.floor(lerp(pal.g0[k], pal.g1[k], u) * 0.7)));
+    for (const k of [-3, 0, 3]) { g.beginPath(); g.moveTo(x + k, y); g.lineTo(x + k * 2, y - rr(4, 9)); g.stroke(); }
+  }
+  g.globalAlpha = 1;
+  // decorations, kept clear of the road and the act banners
+  const clear = (x, y, d) => ROAD.every(p => Math.hypot(p.x - x, p.y - y) > d) &&
+    BANNERS.every(b => Math.abs(b.x - x) > BANNER_W / 2 + 50 || Math.abs(b.y - y) > 40);
+  const items = [];
+  for (let i = 0; i < 2600 && items.length < 360; i++) {
+    const x = rr(8, W - 8), y = rr(30, MAP_H - 6), roll = r(), sz = rr(0.75, 1.3), v = r();
+    const k = roll < 0.56 ? "pine" : roll < 0.72 ? "stone" : roll < 0.88 ? "mush" : "post";
+    if (!clear(x, y, 70)) continue;
+    if ((k === "pine" || k === "post") && !clear(x, y - 40 * sz, 70)) continue;
+    items.push({ x, y, k, sz, v, a: actAtY(y) });
+  }
+  items.sort((p, q) => p.y - q.y);
+  mapDecor = items;
+  for (const it of items) drawDecor(g, it);
+  g.fillStyle = "rgba(150,150,158,.55)";   // ash over the last act
+  for (let i = 0; i < 320; i++) {
+    const x = r() * W, y = r() * BOUNDS[2], rad = rr(1, 2.4);
+    if (ROAD.some(p => Math.abs(p.y - y) < 20 && Math.abs(p.x - x) < 20)) continue;
+    g.beginPath(); g.arc(x, y, rad, 0, TAU); g.fill();
+  }
+  const vg = g.createLinearGradient(0, 0, W, 0);   // darker edges
+  vg.addColorStop(0, "rgba(0,0,0,.5)"); vg.addColorStop(0.2, "rgba(0,0,0,0)"); vg.addColorStop(0.8, "rgba(0,0,0,0)"); vg.addColorStop(1, "rgba(0,0,0,.5)");
+  g.fillStyle = vg; g.fillRect(0, 0, W, MAP_H);
+  strokeRoad(g, ROAD.slice(upto * 16), 0.4);       // the road not yet walked
+  strokeRoad(g, ROAD.slice(0, upto * 16 + 1), 1);
+  return c;
+}
+function mapClamp() { map.scroll = clamp(map.scroll, 0, MAP_SCROLL_MAX); }
+const mapTargetFor = i => clamp(NODES[i].y - H * 0.6, 0, MAP_SCROLL_MAX);
+function mapEnter() {
+  map.card = null; map.vel = 0; map.drag = null; map.toast = null;
+  map.anim = { from: map.scroll, to: mapTargetFor(latestUnlocked()), t: 0, dur: 0.6 };
+}
+function mapTick(dt) {
+  if (map.anim) {
+    const a = map.anim; a.t += dt;
+    const u = clamp(a.t / a.dur, 0, 1);
+    map.scroll = lerp(a.from, a.to, 1 - Math.pow(1 - u, 3));
+    if (u >= 1) map.anim = null;
+  } else if (!map.drag && Math.abs(map.vel) > 2) {
+    map.scroll += map.vel * dt; map.vel *= Math.exp(-5 * dt);
+    if (map.scroll <= 0 || map.scroll >= MAP_SCROLL_MAX) map.vel = 0;
+  } else if (!map.drag) map.vel = 0;
+  mapClamp();
+}
+function mapScrollBy(d) { map.anim = null; map.vel = 0; map.scroll += d; mapClamp(); }
+function mapTap(p) {
+  for (let i = 0; i < LEVELS.length; i++) {
+    const n = NODES[i];
+    if (Math.hypot(p.x - n.x, p.y - (n.y - map.scroll)) <= nodeR(i) + 10) {
+      if (unlocked(i)) { map.card = i; sfx("click"); }
+      else { map.card = null; map.toast = ["Clear the night before this one.", T + 1.8]; sfx("click"); }
+      return;
+    }
+  }
+  map.card = null;
+}
+function drawBanner(b) {
+  const w = BANNER_W, h = BANNER_H, x = b.x - w / 2, y = b.y - h / 2;
+  for (const s of [-1, 1]) {   // ribbon tails with notched ends
+    const ix = s < 0 ? x + 16 : x + w - 16, ox = s < 0 ? x - 22 : x + w + 22;
+    ctx.beginPath(); ctx.moveTo(ix, y + 9); ctx.lineTo(ox, y + 9); ctx.lineTo(ox - s * 11, y + 9 + h / 2);
+    ctx.lineTo(ox, y + h + 9); ctx.lineTo(ix, y + h + 9); ctx.closePath();
+    ctx.fillStyle = "rgb(40,18,34)"; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = CREAM; ctx.stroke();
+  }
+  rrect(x, y, w, h, 6); ctx.fillStyle = "rgb(60,30,50)"; ctx.fill(); ctx.lineWidth = 2.5; ctx.strokeStyle = CREAM; ctx.stroke();
+  text(b.name, b.x, b.y + 1, { size: 20, display: true, color: CREAM, maxW: w - 24 });
+}
+function drawFlameIcon(x, y) {
+  glow(x, y, 16, "rgba(255,170,60,.55)");
+  ctx.fillStyle = EMBER; ctx.beginPath(); ctx.arc(x, y + 3, 6, 0, TAU); ctx.fill();
+  tri([x - 5.5, y + 1, x, y - 11 + Math.sin(T * 9 + x) * 1.5, x + 5.5, y + 1], EMBER);
+  circle(x, y + 3, 3, EMBER_HOT);
+}
+function drawPadlock(x, y) {
+  ring(x, y - 6, 6, "rgb(40,36,40)", 4, Math.PI, TAU);
+  ring(x, y - 6, 6, "rgb(170,160,170)", 2, Math.PI, TAU);
+  ctx.fillStyle = "rgb(40,36,40)"; ctx.fillRect(x - 9, y - 7, 18, 15);
+  ctx.fillStyle = "rgb(170,160,170)"; ctx.fillRect(x - 7, y - 5, 14, 11);
+  ctx.fillStyle = "rgb(40,36,40)"; ctx.fillRect(x - 1.5, y - 2, 3, 5);
+}
+function drawBossIcon(bt, x, y) {
+  if (bt === "king") {
+    ctx.fillStyle = "rgb(200,160,60)"; ctx.fillRect(x - 13, y, 26, 6);
+    for (let k = -1; k <= 1; k++) tri([x + k * 9 - 5, y + 1, x + k * 9, y - 10 - (k ? 0 : 3), x + k * 9 + 5, y + 1], "rgb(200,160,60)");
+  } else if (bt === "mother") {
+    tri([x - 13, y + 7, x, y - 12, x + 13, y + 7], "rgb(140,115,179)");
+    tri([x - 6, y + 7, x, y - 3, x + 6, y + 7], "rgb(58,40,78)");
+  } else if (bt === "warden") {
+    ctx.fillStyle = "rgb(190,180,140)"; ctx.beginPath(); ctx.arc(x, y + 3, 11, Math.PI, 0); ctx.lineTo(x + 13, y + 6); ctx.lineTo(x - 13, y + 6); ctx.closePath(); ctx.fill();
+    circle(x, y + 9, 3, "rgb(190,180,140)"); circle(x, y - 9, 3, "rgb(160,150,120)");
+  } else if (bt === "emperor") {
+    ctx.fillStyle = "rgb(170,140,60)"; ctx.fillRect(x - 15, y, 30, 6);
+    for (let k = -2; k <= 2; k++) tri([x + k * 6.5 - 3.5, y + 1, x + k * 6.5, y - 9 - (k ? 0 : 4), x + k * 6.5 + 3.5, y + 1], "rgb(170,140,60)");
+    for (let k = -1; k <= 1; k++) circle(x + k * 9, y + 3, 1.8, "rgb(200,225,255)");
+  }
+}
+function drawSpirit(x, y, s) {   // the player's lantern spirit, as in play
+  warm(x, y, 48 * s, 0.4);
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  circle(0, 0, PLAYER_R, CREAM);
+  ctx.fillStyle = "#3c281e"; ctx.beginPath(); ctx.arc(-4, -2, 2, 0, TAU); ctx.arc(4, -2, 2, 0, TAU); ctx.fill();
+  const lx = 18, ly = 4;
+  ctx.strokeStyle = "#966e46"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(lx, ly - 13, 7, Math.PI, 0); ctx.stroke();
+  rrect(lx - 8, ly - 10, 16, 18, 4); ctx.fillStyle = "#6e4628"; ctx.fill();
+  const fl = 7 + Math.sin(T * 14) * 1.5;
+  circle(lx, ly - 1, fl, EMBER); circle(lx, ly - 1, Math.max(2, fl - 3), EMBER_HOT);
+  ctx.fillStyle = "#5a3c28"; ctx.fillRect(lx - 10, ly + 7, 20, 5);
+  ctx.restore();
+}
+function drawNode(i, cur) {
+  const n = NODES[i], cfg = LEVELS[i], r = nodeR(i), cleared = save.cleared.includes(i), open = unlocked(i), isCur = i === cur && !cleared;
+  if (isCur) glow(n.x, n.y, r * 2.4 + Math.sin(T * 3) * 9, "rgba(255,150,40,.6)");
+  else if (cleared) glow(n.x, n.y, r * 1.8, "rgba(255,220,120,.22)", "rgba(255,220,120,0)");
+  circle(n.x, n.y + 5, r, "rgba(0,0,0,.55)");
+  circle(n.x, n.y, r, cleared ? EMBER_HOT : isCur ? EMBER : "rgb(70,64,70)");
+  ring(n.x, n.y, r - 2, open ? "rgba(60,30,8,.6)" : "rgba(30,26,30,.7)", 4);
+  ring(n.x, n.y, r + 1.5, open ? CREAM : "rgb(120,110,120)", 3);
+  if (cfg.boss) ring(n.x, n.y, r + 6, DANGER, 4);
+  ctx.font = `700 ${cfg.boss ? 30 : 24}px ${FONT_B}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillStyle = open ? "#2a1608" : "rgb(160,150,160)"; ctx.fillText(String(i + 1), n.x, n.y + 1);
+  if (!open) drawPadlock(n.x + r * 0.78, n.y + r * 0.62);
+  let top = n.y - r - (cfg.boss ? 8 : 4);
+  if (cfg.boss) { drawBossIcon(cfg.btype, n.x, top - 8); top -= 22; }
+  if (cleared) drawFlameIcon(n.x, top - 10);
+  if (isCur) drawSpirit(n.x, top - 22 + Math.sin(T * 3) * 5, 1.25);
+}
+function drawCard(i) {
+  const cfg = LEVELS[i], sy = NODES[i].y - map.scroll, w = 400, h = 150, x = (W - w) / 2;
+  const y = sy > 360 ? 62 : 418;   // near the bottom, unless that would cover the node itself
+  panel(x, y, w, h);
+  button(x + w - 88, y + h - 38, "PLAY", () => { map.card = null; enterLevel(i); }, 140, 48);
+  const hx = register(x + w - 46, y + 10, 36, 36, () => { map.card = null; sfx("click"); });
+  rrect(x + w - 46, y + 10, 36, 36, 6); ctx.fillStyle = hx ? BTN_HOT : BTN; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = CREAM; ctx.stroke();
+  line(x + w - 38, y + 18, x + w - 18, y + 38, WHITE, 3); line(x + w - 18, y + 18, x + w - 38, y + 38, WHITE, 3);
+  register(x, y, w, h, () => {});   // taps on the card itself do nothing
+  text(`LEVEL ${i + 1}: ${cfg.name}`, x + 20, y + 30, { size: 24, align: "left", maxW: w - 80, color: EMBER_HOT });
+  text(goalText(cfg), x + 20, y + 68, { size: 22, align: "left", color: WHITE });
+  const tags = [];
+  if (save.cleared.includes(i)) tags.push(["CLEARED", GOOD]);
+  if (cfg.boss) tags.push(["BOSS", DANGER]);
+  let tx = x + 20;
+  for (const [t, c] of tags) {
+    ctx.font = `700 20px ${FONT_B}`; const tw = ctx.measureText(t).width + 18;
+    rrect(tx, y + 96, tw, 32, 6); ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = c; ctx.stroke();
+    text(t, tx + tw / 2, y + 113, { size: 20, color: c });
+    tx += tw + 10;
+  }
+}
+function drawLevels() {
+  const cur = latestUnlocked();
+  if (!map.bg || map.bgKey !== cur) { map.bg = buildMapBg(cur); map.bgKey = cur; }
+  const sc = map.scroll;
+  ctx.drawImage(map.bg, 0, sc, W, H, 0, 0, W, H);
+  ctx.save(); ctx.translate(0, -sc);
+  for (const b of BANNERS) if (b.y > sc - 60 && b.y < sc + H + 60) drawBanner(b);
+  for (let i = 0; i < LEVELS.length; i++) if (NODES[i].y > sc - 140 && NODES[i].y < sc + H + 80) drawNode(i, cur);
+  ctx.restore();
+  for (let k = 0; k < 16; k++) {   // drifting embers
+    const x = (k * 173.3 + Math.sin(T * 0.7 + k) * 30 + 2000) % W, y = ((k * 211.7 - T * (14 + 5 * (k % 3))) % H + H) % H;
+    glow(x, y, 7, "rgba(255,170,70,.35)", "rgba(255,170,70,0)"); circle(x, y, 1.4, "rgba(255,220,150,.7)");
+  }
+  // fixed HUD
+  ctx.fillStyle = "rgba(8,5,10,.9)"; ctx.fillRect(0, 0, W, 50); ctx.fillRect(0, H - 64, W, 64);
+  line(0, 50, W, 50, "rgba(255,240,200,.4)", 2); line(0, H - 64, W, H - 64, "rgba(255,240,200,.4)", 2);
+  text("HOLLOW FOREST", 18, 26, { size: 24, display: true, align: "left", color: EMBER_HOT });
+  text(STORY.ACT_NAMES[actAtY(sc + H / 2)], W / 2 + 20, 26, { size: 18, color: CREAM, maxW: 330 });
+  text(`SHARDS ${save.shards}`, W - 18, 26, { size: 24, align: "right", color: EMBER_HOT });
+  button(150, H - 32, "BACK", () => go("menu"), 220, 46);
+  button(W - 190, H - 32, "LAMP UPGRADES", () => go("shop"), 300, 46);
+  text(touchMode ? "Drag to explore" : "Drag or scroll", W / 2 - 40, H - 32, { size: 18, color: CREAM });
+  register(0, 0, W, 50, () => {}); register(0, H - 64, W, 64, () => {});
+  if (map.card != null) drawCard(map.card);
+  if (map.toast && T < map.toast[1]) {
+    rrect(W / 2 - 230, H - 128, 460, 46, 10); ctx.fillStyle = "rgba(16,10,10,.95)"; ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = DANGER; ctx.stroke();
+    text(map.toast[0], W / 2, H - 105, { size: 22, color: DANGER });
+  }
+}
+function drawShop() {
+  drawBackdrop();
+  text("OIL LAMP WORKSHOP", W / 2, 38, { size: 38, display: true, color: EMBER_HOT });
+  text(`You have ${save.shards} shards. ${touchMode ? "Tap" : "Click"} an upgrade to buy it.`, W / 2, 80, { size: 20 });
+  const cw = 432, ch = 100, gap = 12, x0 = 40, y0 = 108;
+  UPGRADES.forEach((u, i) => {
+    const x = x0 + (i % 2) * (cw + 16), y = y0 + Math.floor(i / 2) * (ch + gap);
+    const lvl = save.up[u.key], maxed = lvl >= u.max, cost = upgradeCost(u, lvl), afford = !maxed && save.shards >= cost;
+    const hover = register(x, y, cw, ch, () => buy(u.key), !maxed);
+    const just = bought && bought[0] === u.key && T < bought[1];
+    rrect(x, y, cw, ch, 12); ctx.fillStyle = just ? "#3c6e28" : (hover ? BTN_HOT : BTN); ctx.fill();
+    ctx.lineWidth = afford ? 4 : 2; ctx.strokeStyle = afford ? EMBER_HOT : CREAM; ctx.stroke();
+    text(u.name, x + 14, y + 20, { size: 24, align: "left" });
+    for (let p = 0; p < u.max; p++) {
+      const px = x + cw - 14 - (u.max - p) * 22, py = y + 12;
+      ctx.fillStyle = p < lvl ? EMBER_HOT : BLACK; ctx.fillRect(px, py, 16, 16);
+      ctx.strokeStyle = CREAM; ctx.lineWidth = 2; ctx.strokeRect(px, py, 16, 16);
+    }
+    if (maxed) { text(u.fmt(lvl), x + 14, y + 50, { size: 20, align: "left", color: CREAM }); text("FULLY UPGRADED", x + 14, y + 78, { size: 20, align: "left", color: GOOD }); }
+    else {
+      text(`${u.fmt(lvl)} -> ${u.fmt(lvl + 1)}`, x + 14, y + 50, { size: 20, align: "left", color: CREAM });
+      text(`COST ${cost}`, x + 14, y + 78, { size: 20, align: "left", color: afford ? EMBER_HOT : DANGER });
+    }
+  });
+  if (toast && T < toast[1]) text(toast[0], W / 2, 556, { size: 24, color: DANGER });
+  button(W / 2, 600, "BACK TO LEVELS", () => go("levels"), 320, 46);
+}
+function drawResult() {
+  ctx.fillStyle = "rgba(0,0,0,.65)"; ctx.fillRect(0, 0, W, H);
+  panel(80, 110, 800, 420);
+  const cx = W / 2;
+  let rows;
+  if (state === "victory") {
+    text("THE NIGHT ENDS", cx, 175, { size: 56, display: true, color: EMBER_HOT });
+    text("The Emperor has fallen. Elin is going home.", cx, 240, { size: 24 });
+    text(`Shards earned: ${lastEarned}`, cx, 280, { size: 24, color: CREAM });
+    rows = [["LEVEL SELECT", () => go("levels")], ["LAMP UPGRADES", () => go("shop")]];
+  } else if (state === "clear") {
+    text("THE NIGHT PASSES", cx, 175, { size: 56, display: true, color: EMBER_HOT, maxW: 760 });
+    text(`Shards earned: ${lastEarned}  (includes ${S.bonus} level bonus)`, cx, 240, { size: 24 });
+    text(`Total shards: ${save.shards}`, cx, 275, { size: 24, color: EMBER_HOT });
+    rows = [["NEXT LEVEL", nextLevel], ["LAMP UPGRADES", () => go("shop")], ["LEVEL SELECT", () => go("levels")]];
+  } else {
+    text("THE LIGHT FADES", cx, 175, { size: 52, display: true, color: DANGER });
+    text(`Shards kept: ${lastEarned}     Total: ${save.shards}`, cx, 240, { size: 24 });
+    const ll = STORY.LOSE_LINES[actOf(S.idx)];
+    text(ll[S.idx % ll.length], cx, 275, { size: 20, color: CREAM, maxW: 760 });
+    rows = [["TRY AGAIN", () => enterLevel(S.idx)], ["LAMP UPGRADES", () => go("shop")], ["LEVEL SELECT", () => go("levels")]];
+  }
+  let y = 345;
+  for (const [label, fn] of rows) { button(cx, y, label, fn); y += 60; }
+}
+function drawPause() {
+  ctx.fillStyle = "rgba(0,0,0,.65)"; ctx.fillRect(0, 0, W, H);
+  panel(230, 150, 500, 360);
+  text("PAUSED", W / 2, 215, { size: 56, display: true });
+  button(W / 2, 300, "RESUME", () => { state = "play"; sfx("click"); });
+  button(W / 2, 365, muted ? "SOUND: OFF" : "SOUND: ON", toggleMute);
+  button(W / 2, 430, "QUIT TO LEVELS", abandon);
+}
+
+const inScene = () => S && ["play", "pause", "clear", "over", "victory"].includes(state);
+function draw() {
+  hot = [];
+  ctx.clearRect(0, 0, W, H);
+  if (state === "story") drawStory();
+  else if (inScene()) {
+    drawPlay(S); drawHud(S);
+    if (state === "pause") drawPause(); else if (state !== "play") drawResult();
+  } else if (state === "levels") drawLevels();
+  else if (state === "shop") drawShop();
+  else drawMenu();
+}
+
+/* ---------- main loop & sizing ---------- */
+function resize() {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const sc = Math.min(innerWidth / W, innerHeight / H);
+  cv.style.width = Math.floor(W * sc) + "px"; cv.style.height = Math.floor(H * sc) + "px";
+  cv.width = Math.round(W * sc * dpr); cv.height = Math.round(H * sc * dpr);
+  ctx.setTransform(cv.width / W, 0, 0, cv.height / H, 0, 0);
+}
+addEventListener("resize", resize); resize();
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 0.05); last = now; T += dt;
+  if (state === "story") storyTick(dt);
+  if (state === "levels") mapTick(dt);
+  if (state === "play" && S) {
+    if (window.EmberDebug && EmberDebug.god && !S.result) S.oil = S.st.maxOil;
+    const inp = readInput();
+    S.update(dt, inp.move, inp.aim, inp.fire, dashReq); dashReq = false;
+    if (S.result && S.resultT > 1.3) finishSession();
+  } else if (["clear", "over", "victory"].includes(state) && S) S.update(dt, { x: 0, y: 0 }, null, false, false);
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+cv.focus();
+
+// small hook so the page can be inspected or automated (tests use it; players never see it)
+window.EmberDebug = {
+  god: false,
+  get state() { return state; }, get session() { return S; }, get save() { return save; },
+  get groundAct() { return groundAct; },
+  get story() { return { i: story.i, n: story.pages.length, t: story.t, page: story.pages[story.i] || "", shown: story.shown }; },
+  get dialogue() {
+    const pg = story.pg;
+    return pg ? { who: pg.who, head: pg.head, text: pg.text, shown: story.shown, len: pg.text.length, total: pg.total, t: story.t,
+      complete: storyComplete(), i: story.i, n: story.pages.length } : null;
+  },
+  get blips() { return { count: blipCount, sounded: blipSounded }; },
+  parsePage,
+  get map() {
+    return { scroll: map.scroll, vel: map.vel, anim: !!map.anim, card: map.card, dragging: !!map.drag, MAP_H, max: MAP_SCROLL_MAX,
+      toast: map.toast && T < map.toast[1] ? map.toast[0] : null };
+  },
+  nodes: () => NODES.map((n, i) => ({ i, x: n.x, y: n.y, sy: n.y - map.scroll, r: nodeR(i), open: unlocked(i), cleared: save.cleared.includes(i) })),
+  banners: () => BANNERS, road: () => ROAD, decor: () => mapDecor,
+  setScroll: v => { map.anim = null; map.vel = 0; map.scroll = v; mapClamp(); },
+  levels: LEVELS, STORY, keys,
+  start: startLevel, enter: enterLevel, play: playPressed, go, showStory, setState: s => { state = s; },
+  skipStory: storySkip, advance: storyAdvance,
+  win: () => { if (S) { S.finish("win"); S.resultT = 2; } },
+  lose: () => { if (S) { S.finish("lose"); S.resultT = 2; } },
+  // run the current session's rules for `sec` seconds at 60 fps with no input
+  step: (sec, keepOil = false) => {
+    for (let i = 0; i < Math.round(sec * 60) && S && !S.result; i++) { if (keepOil) S.oil = S.st.maxOil; S.update(1 / 60, { x: 0, y: 0 }, null, false, false); }
+  },
+  clearUpTo: n => { save.cleared = LEVELS.map((_, i) => i).slice(0, n); writeSave(); },
+  unlockAll: () => { save.cleared = LEVELS.map((_, i) => i).slice(0, LEVELS.length - 1); writeSave(); },
+  setMuted, get muted() { return muted; },
+  music: () => ({ ac: AC ? AC.state : "none", running: !!music, notes: music ? music.notes : 0, t0: music ? music.t0 : 0 }),
+};
+</script>
+
+</body></html>
